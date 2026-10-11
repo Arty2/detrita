@@ -2,7 +2,7 @@
 try {
 	if ('serviceWorker' in navigator && navigator.serviceWorker && location.protocol !== 'file:') {
 	const SW_CODE = `
-		const CACHE = 'detrita-v3';
+		const CACHE = 'detrita-v4';
 		const ASSETS = ['/'];
 
 		self.addEventListener('install', (e) => {

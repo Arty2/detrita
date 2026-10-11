@@ -37,8 +37,6 @@
 		color: var(--text);
 	}
 	.brand-svg { width: 26px; height: 22px; }
-	.brand-full { display: none; }
-	.brand-abbr { display: none; }
 	.brand.drop-hover { background: var(--red-bg, rgba(200,40,40,0.1)); color: var(--red); }
 	.card.dragging.shrink-delete {
 		width: 30% !important;

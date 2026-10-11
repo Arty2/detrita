@@ -1,15 +1,25 @@
 # /detrita
 
-A local-first kanban board. No account, no server — your data stays in the browser.
+**/detrita** is a kanban board that runs entirely in the web browser. It needs no account and no server: the whole application is a single HTML file, and the board is stored on the user's own device.
 
 - Project page: [heracl.es/detrita](https://heracl.es/detrita)
 - Demo: [detrita.vercel.app](https://detrita.vercel.app/)
 - Source: [github.com/arty2/detrita](https://github.com/arty2/detrita)
-- Current version: 0.85.0 (2026-08-05)
+- Current version: 0.85.1 (2026-10-11)
 
-## Mental model
+## Design
 
-Stages (columns) are shared across all swimlanes. Swimlanes are horizontal rows. Each cell (swimlane × stage) holds sorted cards. The Inbox is a virtual swimlane for unsorted cards.
+A board is a grid. Columns are *stages*, such as Backlog, Active and Done, and are shared by every row. Rows are *swimlanes*, typically one per project. Each cell, where a swimlane meets a stage, holds an ordered list of cards. An *inbox* sits below the board and collects cards that have not yet been sorted.
+
+A card has a title, optional notes written in Markdown, assignees (`@name`), labels (`#label`), start and due dates, and a type: task, meeting or follow-up. Cards are moved by dragging, with the keyboard, or in bulk after selecting several. A stage can be marked as a "done" column, and one such stage can collect cards automatically when they are ticked off. Stage templates for common workflows (Kanban, Scrum, GTD, sales, CRM, content and support) rename and remap the columns without losing cards.
+
+The filter bar narrows the board by assignee (`@`), label (`#`), card type (`$task`, `$meeting`, `$followup`) or status (`$overdue`, `$done`); plain text matches titles. Pressing `?` in the app lists the keyboard shortcuts and gestures.
+
+## Storage and sync
+
+The board is saved automatically in the browser's private file storage (OPFS), with IndexedDB as a fallback, and nothing leaves the device. It can be exported to Markdown, CSV or JSON, and imported back from any of them.
+
+In Chrome and Edge the board can also be kept in sync with a local Markdown file. The file follows the format of the Obsidian Kanban plugin: stages become `##` headings, swimlanes `###` headings, and cards checklist items, each tagged with a block ID (`^id`) so that it keeps its identity between syncs. Because the file is ordinary text, it can be shared through tools such as Syncthing, Dropbox or Obsidian Sync, and changes made elsewhere are picked up automatically.
 
 ## Etymology
 
@@ -19,102 +29,21 @@ The Latin noun is fourth declension, so its plural is **dētrītūs** — spelle
 
 It has two anagrams, and a board like this earns both: *attired* and *eat dirt*.
 
-## Data
+## Development
 
-Saved locally in the browser (OPFS/IndexedDB). Export to Obsidian-compatible Markdown, CSV, or JSON. Sync to a local `.md` file (Chrome/Edge) via the Export / Import panel — works with Syncthing, Obsidian Sync, and Dropbox. Long-press the theme button for print preview.
-
-### File sync
-
-The `.md` file format is Obsidian Kanban–compatible: YAML frontmatter for board config (stages, swimlanes, colors), stages as `## Headings`, swimlanes as `### Sub-headings`, cards as `- [x]` list items with `#tags` `@mentions` `due:YYYY-MM-DD`, block IDs (`^cardId`) for stable identity across syncs, and card notes as indented continuation lines.
-
-Auto-save interval: 1, 10, or 30 minutes. Polls for external changes and merges automatically.
-
-### Cell editor
-
-Long-press the + button in any cell to open a markdown editor for the entire cell. Existing cards appear as Obsidian-format list items. Edit, reorder, or paste markdown todos. Cards are matched by `^blockId` on save; new lines create new cards. Long-press the Inbox button to edit inbox cards the same way.
-
-### Templates
-
-Stage templates remap columns semantically: Kanban, Scrum, GTD, Sales, CRM, Content, Support.
-
-## Keyboard shortcuts
-
-| Key | Action |
-|---|---|
-| `↑` `↓` | Navigate cards within column |
-| `←` `→` | Move focus to adjacent column |
-| `Shift` `↑` `↓` | Select cards |
-| `Tab` | Cycle: input → buttons → cards |
-| `Page Down` `Page Up` | Next / previous swimlane |
-| `Enter` | Open card detail panel |
-| `e` | Inline edit focused card title |
-| `n` | New card in focused column |
-| `Delete` | Delete focused card |
-| `Space` | Toggle done on focused card |
-| `Esc` | Close panel or cancel |
-| `/` or `Ctrl` `F` | Focus search |
-| `i` | Toggle inbox panel |
-| `?` or `F1` | Toggle help panel |
-| `Alt` `↑` `↓` | Reorder card within column |
-| `Alt` `←` `→` | Move card to adjacent column |
-| `Ctrl` `Shift` `N` | Focus quick capture input |
-| `Ctrl` `O` | Open Export / Import |
-| `Ctrl` `S` | Export as Markdown |
-| `Ctrl` `Shift` `S` | Copy board to clipboard |
-| `Ctrl` `Shift` `O` | Paste board from clipboard |
-| `Ctrl` `Z` | Undo |
-| `Ctrl` `Shift` `Z` | Redo |
-
-## Interactions
-
-| Action | Effect |
-|---|---|
-| Double-click card | Toggle done / not done |
-| Double-click stage | Rename stage |
-| Double-click swimlane | Rename swimlane |
-| Double-click cell | New card in that cell |
-| Long-press + button | Edit cell as Markdown |
-| Long-press Inbox | Edit inbox as Markdown |
-| Drag card | Move across columns or swimlanes |
-| Drag to brand | Delete card |
-| Drag handle | Reorder swimlanes or stages |
-| Shift + click card | Multi-select cards |
-| Swipe right on panel | Close card detail panel |
-
-## Filter syntax
-
-| Prefix | Matches |
-|---|---|
-| `@name` | Assignee |
-| `#label` | Label |
-| `$task` `$meeting` `$followup` | Card type |
-| `$overdue` `$done` | Status |
-| (no prefix) | Title text |
-
-## Architecture
-
-Single-file HTML app (~281 KB, assembled from `src/`). Three-level keyed DOM reconciler with card signature memoization and RAF-coalesced renders. OPFS primary persistence, IndexedDB fallback, inline Web Worker for off-main-thread writes. File sync via File System Access API with SHA-256 change detection. Installable as a PWA (`manifest.webmanifest` + `icons/` served alongside the app, plus a service worker for offline use).
-
-## Build & deploy
-
-No framework and no runtime dependencies — the app is one static file. Sources live in `src/` (HTML shell, CSS split by `@layer`, JS split by section) and a zero-dependency Node script inlines them into the single `detrita.html`:
+The app uses no framework and has no runtime dependencies. Its source lives in `src/` and is joined into `detrita.html` (and an identical `index.html`) by a small Node script:
 
 ```sh
-node build.js            # regenerate detrita.html + index.html   (npm run build)
-node build.js --check    # fail if the committed output is stale
-npm test                 # Playwright smoke tests
-npm run test:integrity   # build-integrity checks (no browser)
+node build.js            # rebuild detrita.html and index.html
+npm run test:integrity   # build checks, no browser
+npm test                 # browser smoke tests (Playwright)
 ```
 
-The build writes two identical files: `detrita.html` (the portable, shareable single file, openable from `file://`) and `index.html` (so any static host serves the app at `/`). Edit `src/`, run `node build.js`, and commit both regenerated files with the source change. GitHub Actions builds, verifies the committed output is current, and runs the tests on every push. See [CLAUDE.md](CLAUDE.md) for the source layout and conventions.
-
-The PWA manifest (`manifest.webmanifest`) and its icons (`icons/`) are committed static files served next to the app. Regenerate the icons from the brand mark with `npm run gen:icons` (uses the Playwright browser; only needed when the mark or its colors change).
-
-Hosting is static — nothing to build on the host. `index.html` at the root makes `/` serve the app on any static host. On Vercel, `vercel.json` turns the build off and serves the committed repo root with the right manifest/icon headers; `_redirects` covers Netlify/Cloudflare Pages.
+Both generated files are committed, so the app can be opened straight from disk or served by any static host without a build step. See [CLAUDE.md](CLAUDE.md) for the source layout and conventions.
 
 ## Browser support
 
-Chrome 117+, Safari 17.5+, Firefox 129+. File sync: Chrome/Edge only.
+Chrome 117+, Safari 17.5+ and Firefox 129+. Syncing with a local file requires Chrome or Edge.
 
 ## License
 
