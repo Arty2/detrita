@@ -164,7 +164,6 @@ function inlineEditCard(cardEl) {
 	const titleEl = cardEl.querySelector('.card__title');
 	if (!titleEl) return;
 
-	cardEl.dataset.interacting = 'true';
 	const input = document.createElement('input');
 	input.type = 'text';
 	input.value = card.title;
@@ -176,7 +175,6 @@ function inlineEditCard(cardEl) {
 
 	let cancelled = false;
 	const finish = () => {
-		delete cardEl.dataset.interacting;
 		const newTitle = input.value.trim() || card.title;
 		if (cancelled || newTitle === card.title) { input.replaceWith(titleEl); return; }
 		pushUndo('rename card');
@@ -396,6 +394,8 @@ class PersistenceLayer {
 // ══════════════════════════════════════════════════════════════
 
 const persistence = new PersistenceLayer();
+let _bootReady = Promise.resolve(); // settles once the saved board (or the demo) is in place
+const LOCAL_MODIFIED_KEY = 'detrita-local-modified';
 
 function initApp() {
 
@@ -411,13 +411,9 @@ function initApp() {
 	} catch (_) {}
 
 	// Initialize persistence and load saved state
-	persistence.init().then(() => persistence.load()).then(saved => {
+	_bootReady = persistence.init().then(() => persistence.load()).then(saved => {
 		if (saved) {
-			batch(() => {
-				if (saved.stages) stages.set(saved.stages);
-				if (saved.projects) projects.set(saved.projects);
-				if (saved.cards) cards.set(saved.cards);
-			});
+			applyBoard(saved);
 		} else {
 			// First visit — load tutorial demo and show help
 			const demo = getDemoData();
@@ -512,20 +508,29 @@ function initApp() {
 	// Persistence — auto-save (debounced, skip if unchanged)
 	let saveTimer = null;
 	let lastSavedHash = '';
-	effect(() => {
-		const data = {
-			stages: stages.get(),
-			projects: projects.get(),
-			cards: cards.get(),
-		};
+	let pendingSave = null;
+	const flushSave = () => {
 		clearTimeout(saveTimer);
-		saveTimer = setTimeout(() => {
-			const json = JSON.stringify(data);
-			if (json === lastSavedHash) return;
-			lastSavedHash = json;
-			persistence.saveRaw(json);
-			fileSync.scheduleSave();
-		}, 1000);
+		const data = pendingSave;
+		pendingSave = null;
+		if (!data) return;
+		const json = JSON.stringify(data);
+		if (json === lastSavedHash) return;
+		lastSavedHash = json;
+		persistence.saveRaw(json);
+		try { localStorage.setItem(LOCAL_MODIFIED_KEY, String(Date.now())); } catch (_) {}
+		fileSync.scheduleSave();
+	};
+	effect(() => {
+		pendingSave = { stages: stages.get(), projects: projects.get(), cards: cards.get() };
+		clearTimeout(saveTimer);
+		saveTimer = setTimeout(flushSave, 1000);
+	});
+	// Don't lose the last second of edits (or a pending file sync) when the tab is hidden or closed
+	document.addEventListener('visibilitychange', () => {
+		if (!document.hidden) return;
+		flushSave();
+		if (fileSync._dirty) fileSync.saveNow();
 	});
 
 	// Keyboard

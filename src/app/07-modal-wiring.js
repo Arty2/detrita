@@ -587,6 +587,7 @@ function wireUpGlobalEvents() {
 	// Sync panel controls
 	// Auto-reconnect on load
 	(async () => {
+		await _bootReady; // read the local board first, then decide which side is newer
 		const stored = await fileSync._loadHandle();
 		if (stored) {
 			fileSync._handle = stored;
@@ -677,12 +678,7 @@ function wireUpGlobalEvents() {
 			try {
 				const data = JSON.parse(ev.target.result);
 				if (!data.cards || !data.stages || !data.projects) throw new Error('Invalid format');
-				pushUndo('import backup');
-				batch(() => {
-					stages.set(data.stages);
-					projects.set(data.projects);
-					cards.set(data.cards);
-				});
+				applyBoard(data, 'import backup');
 				document.getElementById('vault-modal').classList.remove('open');
 				showToast(`Restored ${data.cards.length} cards`);
 			} catch (err) {
@@ -716,12 +712,7 @@ function wireUpGlobalEvents() {
 			try {
 				const data = JSON.parse(text);
 				if (data.cards && data.stages && data.projects) {
-					pushUndo('paste backup');
-					batch(() => {
-						stages.set(data.stages);
-						projects.set(data.projects);
-						cards.set(data.cards);
-					});
+					applyBoard(data, 'paste backup');
 					document.getElementById('vault-modal').classList.remove('open');
 					showToast(`Pasted ${data.cards.length} cards from clipboard`);
 					return;
@@ -1022,7 +1013,7 @@ function importFromCsv(text) {
 		}
 
 		if (stageName && !stageSet.has(stageName.toLowerCase())) {
-			const sid = stageName.toLowerCase().replace(/\s+/g, '-');
+			const sid = uniqueStageId(stageName, new Set([...stageSet.values()].map(s => s.id)));
 			const isDone = /^(done|complete|finished)$/i.test(stageName);
 			stageSet.set(stageName.toLowerCase(), {
 				id: sid, name: stageName,
@@ -1032,13 +1023,11 @@ function importFromCsv(text) {
 		}
 
 		const proj = isInbox ? null : swimlaneMap.get(swimName);
-		const stageId = stageName ? stageName.toLowerCase().replace(/\s+/g, '-') : (defaultStages[0]?.id || 'backlog');
-		const colId = isInbox ? 'inbox-col' : `col-${proj.id}-${stageId}`;
 		const projId = isInbox ? 'inbox' : proj.id;
 
 		allCards.push({
-			id: 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
-			title, columnId: colId, projectId: projId, order: i,
+			id: newCardId(), _stageKey: stageName.toLowerCase(),
+			title, columnId: 'inbox-col', projectId: projId, order: i,
 			done, type: ['task','meeting','followup'].includes(type) ? type : 'task',
 			assignees, labels, notes,
 			startDate: startDate && /\d{4}-\d{2}-\d{2}/.test(startDate) ? startDate : null,
@@ -1049,6 +1038,13 @@ function importFromCsv(text) {
 
 	const newStages = stageSet.size > 0 ? [...stageSet.values()] : defaultStages;
 	const newProjects = [...swimlaneMap.values()];
+	// Resolve columns once the stage list is known: rows without a stage go to its first stage
+	for (const c of allCards) {
+		const stageId = stageSet.get(c._stageKey)?.id || newStages[0]?.id;
+		if (c.projectId !== 'inbox' && stageId) c.columnId = `col-${c.projectId}-${stageId}`;
+		else { c.projectId = 'inbox'; c.columnId = 'inbox-col'; }
+		delete c._stageKey;
+	}
 
 	pushUndo('import CSV');
 	batch(() => {
@@ -1285,11 +1281,11 @@ function showBulkBar() {
 		<span class="bulk-bar__count">${selectedCards.size}</span>
 		<select id="bulk-move-project" title="Move to swimlane">
 			<option value="">Swimlane…</option>
-			${projects.peek().map(p => `<option value="${p.id}">${escHtml(p.name)}</option>`).join('')}
+			${projects.peek().map(p => `<option value="${escHtml(p.id)}">${escHtml(p.name)}</option>`).join('')}
 		</select>
 		<select id="bulk-move-stage" title="Move to stage">
 			<option value="">Stage…</option>
-			${stages.peek().map(s => `<option value="${s.id}">${escHtml(s.name)}</option>`).join('')}
+			${stages.peek().map(s => `<option value="${escHtml(s.id)}">${escHtml(s.name)}</option>`).join('')}
 		</select>
 		<button class="bulk-icon-btn bulk-icon-btn--danger" id="bulk-delete" title="Delete">${ICON_TRASH}</button>
 		<button class="bulk-icon-btn" id="bulk-done" title="Mark done">${ICON_CHECK_SQUARE}</button>
@@ -1439,12 +1435,14 @@ function serializeBoardMd() {
 	md += 'kanban-plugin: detrita\n';
 	md += 'detrita: v1\n';
 	md += 'stages:\n';
+	// JSON strings are valid YAML double-quoted scalars, so names may hold commas and quotes
+	const q = JSON.stringify;
 	for (const s of stgs) {
-		md += `  - { id: "${s.id}", label: "${s.name}", color: "${s.color}"${s.done ? ', done: true' : ''}${s.automove ? ', automove: true' : ''} }\n`;
+		md += `  - { id: ${q(s.id)}, label: ${q(s.name)}, color: ${q(s.color)}${s.done ? ', done: true' : ''}${s.automove ? ', automove: true' : ''} }\n`;
 	}
 	md += 'swimlanes:\n';
 	for (const p of projs) {
-		md += `  - { id: "${p.id}", label: "${p.name}", color: "${p.color}"${p.collapsed ? ', collapsed: true' : ''} }\n`;
+		md += `  - { id: ${q(p.id)}, label: ${q(p.name)}, color: ${q(p.color)}${p.collapsed ? ', collapsed: true' : ''} }\n`;
 	}
 	md += '---\n\n';
 
@@ -1465,6 +1463,18 @@ function serializeBoardMd() {
 	return md;
 }
 
+// One frontmatter list item, `- { id: "x", label: "A, \\"B\\"", done: true }` → { id, label, done }.
+// Values are JSON-style quoted strings or bare words (older files quote without escaping).
+function parseFmItem(line) {
+	const out = {};
+	for (const m of line.matchAll(/(\w+):\s*("(?:[^"\\]|\\.)*"|[^,}]+)/g)) {
+		let v = m[2].trim();
+		if (v.startsWith('"')) { try { v = JSON.parse(v); } catch (_) { v = v.slice(1, -1); } }
+		out[m[1]] = v;
+	}
+	return out;
+}
+
 function parseBoardMd(text) {
 	const lines = text.split('\n');
 
@@ -1476,18 +1486,12 @@ function parseBoardMd(text) {
 			if (lines[i].trim() === '---') { fmEnd = i + 1; break; }
 		}
 		const fmText = lines.slice(1, fmEnd - 1).join('\n');
-		const stagesBlock = fmText.match(/stages:\n((?:\s+-[^\n]+\n?)*)/);
-		if (stagesBlock) {
-			for (const m of stagesBlock[1].matchAll(/id:\s*"?([^",}]+)"?,\s*label:\s*"?([^",}]+)"?,\s*color:\s*"?([^",}]+)"?(?:,\s*done:\s*(true))?(?:,\s*automove:\s*(true))?(?:,\s*collapsed:\s*(true))?/g)) {
-				fmStages.push({ id: m[1].trim(), name: m[2].trim(), color: m[3].trim(), done: !!m[4], automove: !!m[5] });
-			}
-		}
-		const swimBlock = fmText.match(/swimlanes:\n((?:\s+-[^\n]+\n?)*)/);
-		if (swimBlock) {
-			for (const m of swimBlock[1].matchAll(/id:\s*"?([^",}]+)"?,\s*label:\s*"?([^",}]+)"?,\s*color:\s*"?([^",}]+)"?(?:,\s*done:\s*(true))?(?:,\s*collapsed:\s*(true))?/g)) {
-				fmSwimlanes.push({ id: m[1].trim(), name: m[2].trim(), color: m[3].trim(), collapsed: !!m[5] });
-			}
-		}
+		const items = (key) => {
+			const block = fmText.match(new RegExp(`${key}:\\n((?:\\s+-[^\\n]+\\n?)*)`));
+			return block ? block[1].split('\n').map(parseFmItem).filter(o => o.id && o.label) : [];
+		};
+		fmStages = items('stages').map(o => ({ id: o.id, name: o.label, color: o.color || '#7a5040', done: o.done === 'true', automove: o.automove === 'true' }));
+		fmSwimlanes = items('swimlanes').map(o => ({ id: o.id, name: o.label, color: o.color || '#2b4abd', collapsed: o.collapsed === 'true' }));
 	}
 
 	// Parse markdown body
@@ -1510,8 +1514,7 @@ function parseBoardMd(text) {
 			inInbox = name.toLowerCase() === 'inbox' && !stageMap.has(name);
 			currentStage = inInbox ? null : stageMap.get(name)?.id;
 			if (!inInbox && !currentStage) {
-				const sid = name.toLowerCase().replace(/\s+/g, '-');
-				currentStage = fmStages.some(s => s.id === sid) ? `${sid}-${fmStages.length + 1}` : sid;
+				currentStage = uniqueStageId(name, new Set(fmStages.map(s => s.id)));
 				fmStages.push({ id: currentStage, name, color: '#7a5040', done: name.toLowerCase() === 'done' });
 				stageMap.set(name, fmStages[fmStages.length - 1]);
 			}
@@ -1579,7 +1582,18 @@ function parseBoardMd(text) {
 	return { stages: fmStages, projects: fmSwimlanes, cards: allCards };
 }
 
-// Replace the board with parsed/imported data. Cards that already exist keep their
+// Fill in any fields an imported card lacks, so rendering never trips over a missing array.
+function normalizeCard(c) {
+	return {
+		title: '', order: 0, done: false, type: 'task', notes: '', startDate: null, dueDate: null,
+		...c,
+		id: String(c.id),
+		assignees: Array.isArray(c.assignees) ? c.assignees.map(String) : [],
+		labels: Array.isArray(c.labels) ? c.labels.map(String) : [],
+	};
+}
+
+// Replace the board with parsed, imported or saved data. Cards that already exist keep their
 // creation time, so a sync or re-import doesn't reset every card's age.
 function applyBoard(data, action) {
 	if (action) pushUndo(action);
@@ -1587,9 +1601,10 @@ function applyBoard(data, action) {
 	batch(() => {
 		if (data.stages?.length) stages.set(data.stages);
 		if (data.projects?.length) projects.set(data.projects);
-		cards.set(data.cards.map(c => {
-			const old = prev.get(c.id);
-			return old?._created ? { ...c, _created: old._created } : c;
+		cards.set((Array.isArray(data.cards) ? data.cards : []).filter(c => c?.id != null && c.columnId).map(c => {
+			const card = normalizeCard(c);
+			const old = prev.get(card.id);
+			return old?._created ? { ...card, _created: old._created } : card;
 		}));
 	});
 }
@@ -1626,14 +1641,15 @@ class FileSync {
 				suggestedName: 'board.md',
 				types: [{ description: 'Markdown', accept: { 'text/markdown': ['.md'] } }],
 			});
-			await this._readFromFile();
-			this._enabled = true;
+			this._enabled = true; // before reading, so an empty file gets the board written to it
+			await this._readFromFile(false);
 			this._startPolling();
 			this._persistHandle();
 			this._updateUI(true);
 			showToast('Syncing to ' + this._handle.name);
 			return true;
 		} catch (e) {
+			this._enabled = false;
 			if (e.name !== 'AbortError') showToast('File sync failed');
 			return false;
 		}
@@ -1649,13 +1665,14 @@ class FileSync {
 		try {
 			const perm = await this._handle.requestPermission({ mode: 'readwrite' });
 			if (perm !== 'granted') { showToast('Permission denied'); return false; }
-			await this._readFromFile();
 			this._enabled = true;
+			await this._readFromFile(true);
 			this._startPolling();
 			this._updateUI(true);
 			showToast('Reconnected to ' + this._handle.name);
 			return true;
 		} catch (e) {
+			this._enabled = false;
 			showToast('Reconnect failed');
 			return false;
 		}
@@ -1670,16 +1687,20 @@ class FileSync {
 		showToast('File sync disconnected');
 	}
 
-	async _readFromFile() {
+	// On reconnect (`keepNewer`), the board edited here since the file was last written wins;
+	// otherwise — or if the file changed more recently — the file's content is loaded.
+	async _readFromFile(keepNewer) {
 		const file = await this._handle.getFile();
 		const text = await file.text();
 		this._lastModTime = file.lastModified;
 		this._lastHash = await this._hash(text);
 
-		if (text.trim()) {
+		let localModified = 0;
+		try { localModified = Number(localStorage.getItem(LOCAL_MODIFIED_KEY)) || 0; } catch (_) {}
+		if (text.trim() && !(keepNewer && localModified > file.lastModified)) {
 			applyBoard(parseBoardMd(text), 'load from file');
 		} else {
-			// New/empty file — write current board to it
+			// New/empty file, or local edits newer than the file — write the current board to it
 			await this.save();
 		}
 	}
@@ -1687,6 +1708,7 @@ class FileSync {
 	async save() {
 		if (!this._enabled || !this._handle || this._saving) return;
 		this._saving = true;
+		this._dirty = false; // cleared before serialising, so edits made during the write stay dirty
 		try {
 			const md = serializeBoardMd();
 			const hash = await this._hash(md);
@@ -1697,8 +1719,8 @@ class FileSync {
 			await writable.close();
 			this._lastHash = hash;
 			this._lastModTime = Date.now();
-			this._dirty = false;
 		} catch (e) {
+			this._dirty = true;
 			console.warn('File sync save failed:', e);
 			showToast('Sync save failed');
 		}

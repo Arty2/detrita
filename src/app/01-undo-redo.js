@@ -124,6 +124,11 @@ function escHtml(s) {
 	return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
+// The rendered element for a card id (ids come from imported files, so escape them for the selector).
+function cardEl(id) {
+	return document.querySelector(`.card[data-card-id="${CSS.escape(id)}"]`);
+}
+
 // Stable per-name hue for assignee avatars and labels.
 function nameColor(name) {
 	let h = 0;
@@ -436,7 +441,7 @@ function renderBoard() {
 		patch(el, d) {
 			const stgs = d.stgs;
 			let h = `<div class="proj-drop-zone-label" id="add-project-btn" title="Add swimlane">${ICON_PLUS}</div><div class="proj-drop-zone-cols">`;
-			for (const s of stgs) h += `<div class="proj-drop-zone-cell" data-proj-drop-stage="${s.id}"></div>`;
+			for (const s of stgs) h += `<div class="proj-drop-zone-cell" data-proj-drop-stage="${escHtml(s.id)}"></div>`;
 			h += '<div class="proj-drop-zone-col-end"></div></div>';
 			if (el.innerHTML !== h) el.innerHTML = h;
 		},
@@ -482,11 +487,11 @@ function renderBoard() {
 			} else if (first.projId === 'inbox') {
 				if (!inboxOpen.peek()) inboxOpen.set(true);
 				requestAnimationFrame(() => {
-					const el = document.querySelector(`.card[data-card-id="${first.cardId}"]`);
+					const el = cardEl(first.cardId);
 					if (el) { el.focus(); el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' }); }
 				});
 			} else {
-				const el = document.querySelector(`.card[data-card-id="${first.cardId}"]`);
+				const el = cardEl(first.cardId);
 				if (el) { el.focus(); el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' }); }
 			}
 			updateFilterNavState();

@@ -17,8 +17,8 @@ test('committed detrita.html matches a fresh build (not stale)', () => {
 
 test('built file carries the expected markers', () => {
 	const html = fs.readFileSync(OUT, 'utf8');
-	assert.match(html, /0\.85\.1 \(2026-10-11\)/, 'version string present');
-	assert.match(html, /detrita-v4/, 'service worker cache bumped to v4');
+	assert.match(html, /0\.85\.2 \(2026-10-11\)/, 'version string present');
+	assert.match(html, /detrita-v5/, 'service worker cache bumped to v5');
 	assert.match(html, /rel="apple-touch-icon"/, 'apple-touch-icon present');
 	// The manifest is a separate static file, linked by URL — not inlined.
 	assert.match(html, /rel="manifest" href="\/manifest\.webmanifest"/, 'links the manifest file');

@@ -51,7 +51,7 @@ test('help panel shows the current version', async ({ page }) => {
 	await page.locator('#btn-help').click({ force: true });
 	const panel = page.locator('.help-panel');
 	await expect(panel).toBeVisible();
-	await expect(panel).toContainText('0.85.1 (2026-10-11)');
+	await expect(panel).toContainText('0.85.2 (2026-10-11)');
 });
 
 test('links a valid web app manifest served as a separate file', async ({ page }) => {

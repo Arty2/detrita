@@ -5,7 +5,7 @@
 - Project page: [heracl.es/detrita](https://heracl.es/detrita)
 - Demo: [detrita.vercel.app](https://detrita.vercel.app/)
 - Source: [github.com/arty2/detrita](https://github.com/arty2/detrita)
-- Current version: 0.85.1 (2026-10-11)
+- Current version: 0.85.2 (2026-10-11)
 
 ## Design
 

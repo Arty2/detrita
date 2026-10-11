@@ -169,10 +169,14 @@ function parseColId(colId) {
 	return { projectId: parts.slice(1, -1).join('-') || 'inbox', stageId: parts[parts.length - 1] };
 }
 
+// Id derived from a display name: lowercase, dashes for spaces, nothing that needs escaping.
+function slugId(name) {
+	return String(name).toLowerCase().trim().replace(/\s+/g, '-').replace(/[^\w-]/g, '') || 'stage';
+}
+
 // Stage ids derived from names must stay unique on the board.
-function uniqueStageId(name) {
-	const base = name.toLowerCase().trim().replace(/\s+/g, '-').replace(/[^\w-]/g, '') || 'stage';
-	const taken = new Set(stages.peek().map(s => s.id));
+function uniqueStageId(name, taken = new Set(stages.peek().map(s => s.id))) {
+	const base = slugId(name);
 	let id = base, n = 2;
 	while (taken.has(id)) id = `${base}-${n++}`;
 	return id;

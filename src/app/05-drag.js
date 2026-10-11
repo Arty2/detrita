@@ -141,7 +141,7 @@ function initDragAndDrop() {
 			if (tempBadge) tempBadge.remove();
 			card.classList.add('dragging');
 			selectedCards.forEach(id => {
-				const el = document.querySelector(`.card[data-card-id="${id}"]`);
+				const el = cardEl(id);
 				if (el) el.classList.add('dragging');
 			});
 		});
@@ -275,7 +275,7 @@ function startMultiDrag(card, cardId, rect, offsetX, offsetY, startEvent) {
 	}
 	card.classList.add('dragging');
 	selectedCards.forEach(id => {
-		const el = document.querySelector(`.card[data-card-id="${id}"]`);
+		const el = cardEl(id);
 		if (el && el !== card) el.classList.add('dragging');
 	});
 
@@ -367,7 +367,7 @@ function startMultiDrag(card, cardId, rect, offsetX, offsetY, startEvent) {
 		ghost.remove();
 		card.classList.remove('dragging');
 		selectedCards.forEach(id => {
-			const el = document.querySelector(`.card[data-card-id="${id}"]`);
+			const el = cardEl(id);
 			if (el) el.classList.remove('dragging');
 		});
 		delete document.body.dataset.dragging;
@@ -804,7 +804,7 @@ function clearCountHighlights() {
 
 function highlightCollapsedCount(entry) {
 	clearCountHighlights();
-	const cell = document.querySelector(`.col-cell[data-col-id="${entry.colId}"]`);
+	const cell = document.querySelector(`.col-cell[data-col-id="${CSS.escape(entry.colId)}"]`);
 	if (!cell) return;
 	const count = cell.querySelector('.sw-col-count');
 	if (!count) return;
@@ -897,7 +897,7 @@ function cycleFilteredCard(direction) {
 	}
 
 	requestAnimationFrame(() => {
-		const el = document.querySelector(`.card[data-card-id="${entry.cardId}"]`);
+		const el = cardEl(entry.cardId);
 		if (el) {
 			el.focus();
 			el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
@@ -922,7 +922,7 @@ document.addEventListener('click', (e) => {
 	));
 	requestAnimationFrame(() => {
 		requestAnimationFrame(() => {
-			const el = document.querySelector(`.card[data-card-id="${firstCardId}"]`);
+			const el = cardEl(firstCardId);
 			if (el) {
 				el.focus();
 				el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
@@ -983,6 +983,7 @@ function initKeyboard() {
 				});
 				if (hasVisible) {
 					pushUndo('expand swimlane');
+					_lastNavFilter = null; // re-run filter navigation so focus lands on the revealed match
 					projects.update(all => all.map(pr => pr.id === p.id ? { ...pr, collapsed: false } : pr));
 					return;
 				}
@@ -1026,12 +1027,7 @@ function initKeyboard() {
 						try {
 							const data = JSON.parse(text);
 							if (data.stages && data.cards) {
-								pushUndo('paste JSON');
-								batch(() => {
-									stages.set(data.stages);
-									if (data.projects) projects.set(data.projects);
-									cards.set(data.cards);
-								});
+								applyBoard(data, 'paste JSON');
 								showToast(`Pasted ${data.cards.length} cards`);
 								return;
 							}
@@ -1212,7 +1208,7 @@ function moveCardByKey(cardEl, key) {
 		});
 		// Re-focus after re-render
 		requestAnimationFrame(() => {
-			document.querySelector(`.card[data-card-id="${cardId}"]`)?.focus();
+			cardEl(cardId)?.focus();
 		});
 		announce(`Moved ${key === 'ArrowUp' ? 'up' : 'down'}`);
 	} else if (key === 'ArrowLeft' || key === 'ArrowRight') {
@@ -1229,7 +1225,7 @@ function moveCardByKey(cardEl, key) {
 		pushUndo('move card');
 		moveCard(cardId, nextColId, null);
 		requestAnimationFrame(() => {
-			document.querySelector(`.card[data-card-id="${cardId}"]`)?.focus();
+			cardEl(cardId)?.focus();
 		});
 		announce(`Moved to ${nextCell.getAttribute('aria-label') || 'column'}`);
 	}
@@ -1275,7 +1271,7 @@ function openCardPanel(cardId) {
 	// Project dropdown
 	const projSelect = document.getElementById('cpanel-project');
 	projSelect.innerHTML = '<option value="inbox">Inbox</option>' +
-		projects.peek().map(p => `<option value="${p.id}">${escHtml(p.name)}</option>`).join('');
+		projects.peek().map(p => `<option value="${escHtml(p.id)}">${escHtml(p.name)}</option>`).join('');
 	projSelect.value = card.projectId || 'inbox';
 
 	// Stage dropdown
@@ -1283,7 +1279,7 @@ function openCardPanel(cardId) {
 	const currentStageId = parseColId(card.columnId).stageId || '';
 	function populateStages() {
 		stageSelect.innerHTML = stages.peek().map(s =>
-			`<option value="${s.id}">${escHtml(s.name)}${s.done ? ' ✓' : ''}</option>`
+			`<option value="${escHtml(s.id)}">${escHtml(s.name)}${s.done ? ' ✓' : ''}</option>`
 		).join('');
 		stageSelect.value = currentStageId || stages.peek()[0]?.id || '';
 		stageSelect.disabled = projSelect.value === 'inbox';

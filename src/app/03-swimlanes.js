@@ -20,7 +20,8 @@ function patchSwimlane(el, d) {
 
 	// Label
 	let labelEl = el.querySelector(':scope > .sw-label');
-	const labelHtml = `<div class="sw-colorbar" style="background:${p.color}"></div><button class="sw-collapse" data-collapse="${p.id}" aria-label="${p.collapsed ? 'Expand' : 'Collapse'} ${escHtml(p.name)}">${ICON_CHEVRON}</button><span class="sw-name" style="color:${p.color}" data-proj-name="${p.id}">${escHtml(p.name)}</span><span class="sw-reorder-btn proj-drag" data-proj-drag="${p.id}" title="Drag to reorder">${ICON_DRAG}</span><span class="sw-total sw-total--expanded${projTotal === 0 ? ' count-hidden' : ''}">${projTotal}</span><span class="sw-total sw-total--collapsed${projTotal === 0 ? ' count-hidden' : ''}">(${projTotal})</span>`;
+	const pid = escHtml(p.id), color = escHtml(p.color);
+	const labelHtml = `<div class="sw-colorbar" style="background:${color}"></div><button class="sw-collapse" data-collapse="${pid}" aria-label="${p.collapsed ? 'Expand' : 'Collapse'} ${escHtml(p.name)}">${ICON_CHEVRON}</button><span class="sw-name" style="color:${color}" data-proj-name="${pid}">${escHtml(p.name)}</span><span class="sw-reorder-btn proj-drag" data-proj-drag="${pid}" title="Drag to reorder">${ICON_DRAG}</span><span class="sw-total sw-total--expanded${projTotal === 0 ? ' count-hidden' : ''}">${projTotal}</span><span class="sw-total sw-total--collapsed${projTotal === 0 ? ' count-hidden' : ''}">(${projTotal})</span>`;
 	if (!labelEl) {
 		labelEl = document.createElement('div');
 		labelEl.className = 'sw-label';
