@@ -26,11 +26,6 @@ function signal(initialValue) {
 		update(fn) {
 			s.set(fn(_value));
 		},
-		subscribe(fn) {
-			_subs.add(fn);
-			return () => _subs.delete(fn);
-		},
-		_subs,
 	};
 	return s;
 }
@@ -41,6 +36,7 @@ function computed(fn) {
 	const _subs = new Set();
 
 	const innerEffect = {
+		computed: true, // invalidate immediately, even inside batch(), so peek() is never stale
 		run() {
 			_dirty = true;
 			_notify(_subs);
@@ -61,8 +57,9 @@ function computed(fn) {
 		},
 		peek() {
 			if (_dirty) {
+				// Track dependencies (so later writes invalidate us) without subscribing the caller
 				const prev = _currentEffect;
-				_currentEffect = null;
+				_currentEffect = innerEffect;
 				try { _value = fn(); }
 				finally { _currentEffect = prev; }
 				_dirty = false;
@@ -84,7 +81,6 @@ function effect(fn) {
 		},
 	};
 	eff.run();
-	return () => { /* dispose — no-op for simplicity, effects auto-clean via WeakRef-style GC */ };
 }
 
 function batch(fn) {
@@ -100,19 +96,10 @@ function batch(fn) {
 	}
 }
 
-function untracked(fn) {
-	const prev = _currentEffect;
-	_currentEffect = null;
-	try { return fn(); }
-	finally { _currentEffect = prev; }
-}
-
-const peek = untracked;
-
 function _notify(subs) {
 	for (const sub of subs) {
 		if (typeof sub === 'object' && sub.run) {
-			if (_batchDepth > 0) _batchQueue.add(sub);
+			if (_batchDepth > 0 && !sub.computed) _batchQueue.add(sub);
 			else sub.run();
 		} else if (typeof sub === 'function') {
 			sub();
@@ -162,31 +149,49 @@ function setReorderIndicator(el) {
 	document.body.appendChild(el);
 }
 
-const deviceId = 'device-' + Math.random().toString(36).slice(2, 8);
-
 const stages = signal([]);
 const projects = signal([]);
-
-function makeCols(projs, stgs) {
-	const cols = [];
-	for (const p of projs) {
-		for (const s of stgs) {
-			cols.push({ id: `col-${p.id}-${s.id}`, name: s.name, pId: p.id, stage: s.id, wip: 0 });
-		}
-	}
-	return cols;
-}
-
-const cols = signal([]);
-
 const cards = signal([]);
 
-const NOW_STR = new Date().toISOString().slice(0, 10);
+// Column ids are `col-${projectId}-${stageId}`; either id may itself contain dashes,
+// so resolve them against the known stages instead of splitting on '-'.
+function parseColId(colId) {
+	if (!colId || colId === 'inbox-col') return { projectId: 'inbox', stageId: null };
+	let best = null;
+	for (const s of stages.peek()) {
+		if (!colId.endsWith('-' + s.id) || colId.length <= s.id.length + 5) continue;
+		const projectId = colId.slice(4, -(s.id.length + 1));
+		if (projects.peek().some(p => p.id === projectId)) return { projectId, stageId: s.id };
+		if (!best || s.id.length > best.stageId.length) best = { projectId, stageId: s.id };
+	}
+	if (best) return best;
+	const parts = colId.split('-');
+	return { projectId: parts.slice(1, -1).join('-') || 'inbox', stageId: parts[parts.length - 1] };
+}
+
+// Id derived from a display name: lowercase, dashes for spaces, nothing that needs escaping.
+function slugId(name) {
+	return String(name).toLowerCase().trim().replace(/\s+/g, '-').replace(/[^\w-]/g, '') || 'stage';
+}
+
+// Stage ids derived from names must stay unique on the board.
+function uniqueStageId(name, taken = new Set(stages.peek().map(s => s.id))) {
+	const base = slugId(name);
+	let id = base, n = 2;
+	while (taken.has(id)) id = `${base}-${n++}`;
+	return id;
+}
+
+// Local calendar date (YYYY-MM-DD) — date inputs are local, so don't use toISOString (UTC).
+function localDateStr(d = new Date()) {
+	return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+let NOW_STR = localDateStr();
 
 const filterStr = signal('');
 const inboxOpen = signal(false);
 
-const focusedCardId = signal(null);
 const filterPresets = signal([]); // [{name, query}]
 const selectedCards = new Set(); // for multi-select
 

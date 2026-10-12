@@ -23,7 +23,7 @@ function patchStageRow(el, d) {
 			? `<svg width="12" height="12" stroke="var(--green)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"><use href="#i-check-sq"/></svg>`
 			: `<svg width="12" height="12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"><use href="#i-square"/></svg>`;
 		const autoIcon = s.automove ? ' →' : '';
-		h += `<div class="stage-cell" role="columnheader" data-stage-id="${s.id}"><button class="done-toggle" data-done-stage="${s.id}" title="${s.done ? 'Unmark as done column' : 'Mark as done column'}">${doneIcon}</button><span class="stage-name">${escHtml(s.name)}${autoIcon}</span><span class="stage-count${count === 0 ? ' count-hidden' : ''}">${count}</span><span class="sw-reorder-btn stage-drag" title="Drag to reorder">${ICON_DRAG}</span></div>`;
+		h += `<div class="stage-cell" role="columnheader" data-stage-id="${escHtml(s.id)}"><button class="done-toggle" data-done-stage="${escHtml(s.id)}" title="${s.done ? 'Unmark as done column' : 'Mark as done column'}">${doneIcon}</button><span class="stage-name">${escHtml(s.name)}${autoIcon}</span><span class="stage-count${count === 0 ? ' count-hidden' : ''}">${count}</span><span class="sw-reorder-btn stage-drag" title="Drag to reorder">${ICON_DRAG}</span></div>`;
 	}
 	h += `<div class="stage-cell-add stage-cell-add--header" title="Add stage">${ICON_PLUS}</div></div>`;
 	if (el._sig !== h) { el.innerHTML = h; el._sig = h; }

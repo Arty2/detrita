@@ -184,19 +184,6 @@ function wireUpGlobalEvents() {
 				filterInput.blur();
 				return;
 			}
-			// If a focused card is in a collapsed row, uncollapse it
-			const focused = document.querySelector('.card:focus');
-			if (focused) {
-				const swimlane = focused.closest('.swimlane.collapsed');
-				if (swimlane) {
-					const projId = swimlane.dataset?.projId;
-					if (projId) {
-						projects.update(all => all.map(p =>
-							p.id === projId ? { ...p, collapsed: false } : p
-						));
-					}
-				}
-			}
 		}
 	});
 	// Sync clear button and nav visibility with filterStr changes
@@ -266,7 +253,7 @@ function wireUpGlobalEvents() {
 			if (navigator.vibrate) navigator.vibrate(50);
 			e.target.value = '';
 			inboxOpen.set(true);
-					showToast(`Added "${title}" to inbox`);
+			showToast(`Added "${title}" to inbox`);
 		}
 	});
 
@@ -489,8 +476,9 @@ function wireUpGlobalEvents() {
 		btn.classList.add('active');
 		const cpanel = document.getElementById('cpanel');
 		cpanel.style.background = '';
-		if (btn.dataset.type === 'meeting') cpanel.style.background = 'var(--blue-bg)';
-		if (btn.dataset.type === 'followup') cpanel.style.background = 'var(--yellow-bg)';
+		const bg = btn.dataset.type === 'meeting' ? 'var(--blue-bg)' : btn.dataset.type === 'followup' ? 'var(--yellow-bg)' : '';
+		cpanel.style.background = bg;
+		cpanel.style.setProperty('--panel-bg', bg || 'var(--surface)');
 	});
 
 	// Chip inputs
@@ -516,30 +504,17 @@ function wireUpGlobalEvents() {
 		} else {
 			// Create new
 			const id = 'p' + Date.now().toString(36);
-			batch(() => {
-				projects.update(all => [...all, { id, name, color: _selectedProjColor, collapsed: false }]);
-				const stgs = stages.peek();
-				cols.update(all => [
-					...all,
-					...stgs.map(s => ({ id: `col-${id}-${s.id}`, name: s.name, pId: id, stage: s.id, wip: 0 })),
-				]);
-			});
+			projects.update(all => [...all, { id, name, color: _selectedProjColor, collapsed: false }]);
 			showToast(`Swimlane "${name}" created`);
 		}
 		document.getElementById('add-proj-modal').classList.remove('open');
 	});
 	document.getElementById('proj-modal-delete').addEventListener('click', () => {
 		if (!_editingProjId) return;
-		const proj = projects.peek().find(p => p.id === _editingProjId);
-		
 		pushUndo('delete project');
 		batch(() => {
-			// Move cards to inbox
-			cards.update(all => all.map(c =>
-				c.projectId === _editingProjId ? { ...c, columnId: 'inbox-col', projectId: 'inbox' } : c
-			));
+			moveCardsToInbox(c => c.projectId === _editingProjId);
 			projects.update(all => all.filter(p => p.id !== _editingProjId));
-			cols.update(all => all.filter(c => c.pId !== _editingProjId));
 		});
 		document.getElementById('add-proj-modal').classList.remove('open');
 		showToast('Swimlane deleted, cards moved to inbox');
@@ -568,16 +543,11 @@ function wireUpGlobalEvents() {
 			});
 			showToast(`Stage "${name}" updated`);
 		} else {
-			const id = name.toLowerCase().replace(/\s+/g, '-');
-			batch(() => {
-				if (isAutomove) stages.update(all => all.map(s => s.automove ? { ...s, automove: false } : s));
-				stages.update(all => [...all, { id, name, color: '#7a5040', done: isDone, automove: isAutomove }]);
-				const projs = projects.peek();
-				cols.update(all => [
-					...all,
-					...projs.map(p => ({ id: `col-${p.id}-${id}`, name, pId: p.id, stage: id, wip: 0 })),
-				]);
-			});
+			const id = uniqueStageId(name);
+			stages.update(all => [
+				...(isAutomove ? all.map(s => s.automove ? { ...s, automove: false } : s) : all),
+				{ id, name, color: '#7a5040', done: isDone, automove: isAutomove },
+			]);
 			showToast(`Stage "${name}" added`);
 		}
 		document.getElementById('add-col-modal').classList.remove('open');
@@ -591,18 +561,10 @@ function wireUpGlobalEvents() {
 	});
 	document.getElementById('col-modal-delete').addEventListener('click', () => {
 		if (!_editingStageId) return;
-		const stage = stages.peek().find(s => s.id === _editingStageId);
-		
 		pushUndo('delete stage');
 		batch(() => {
-			cards.update(all => all.map(c => {
-				if (c.columnId.endsWith('-' + _editingStageId)) {
-					return { ...c, columnId: 'inbox-col', projectId: 'inbox' };
-				}
-				return c;
-			}));
+			moveCardsToInbox(c => parseColId(c.columnId).stageId === _editingStageId);
 			stages.update(all => all.filter(s => s.id !== _editingStageId));
-			cols.update(all => all.filter(c => c.stage !== _editingStageId));
 		});
 		document.getElementById('add-col-modal').classList.remove('open');
 		showToast('Stage deleted, cards moved to inbox');
@@ -617,8 +579,6 @@ function wireUpGlobalEvents() {
 		document.getElementById('vault-modal').classList.add('open');
 	});
 
-	// Conflict panel
-
 	// Vault import/export
 	document.getElementById('vault-modal-close').addEventListener('click', () => {
 		document.getElementById('vault-modal').classList.remove('open');
@@ -627,6 +587,7 @@ function wireUpGlobalEvents() {
 	// Sync panel controls
 	// Auto-reconnect on load
 	(async () => {
+		await _bootReady; // read the local board first, then decide which side is newer
 		const stored = await fileSync._loadHandle();
 		if (stored) {
 			fileSync._handle = stored;
@@ -717,12 +678,7 @@ function wireUpGlobalEvents() {
 			try {
 				const data = JSON.parse(ev.target.result);
 				if (!data.cards || !data.stages || !data.projects) throw new Error('Invalid format');
-				pushUndo('import backup');
-				batch(() => {
-					stages.set(data.stages);
-					projects.set(data.projects);
-					cards.set(data.cards);
-				});
+				applyBoard(data, 'import backup');
 				document.getElementById('vault-modal').classList.remove('open');
 				showToast(`Restored ${data.cards.length} cards`);
 			} catch (err) {
@@ -756,13 +712,7 @@ function wireUpGlobalEvents() {
 			try {
 				const data = JSON.parse(text);
 				if (data.cards && data.stages && data.projects) {
-					pushUndo('paste backup');
-					batch(() => {
-						stages.set(data.stages);
-						projects.set(data.projects);
-						cards.set(data.cards);
-						cols.set(makeCols(data.projects, data.stages));
-					});
+					applyBoard(data, 'paste backup');
 					document.getElementById('vault-modal').classList.remove('open');
 					showToast(`Pasted ${data.cards.length} cards from clipboard`);
 					return;
@@ -771,13 +721,7 @@ function wireUpGlobalEvents() {
 			// Try Obsidian markdown
 			const parsed = parseBoardMd(text);
 			if (parsed.cards.length) {
-				pushUndo('paste markdown');
-				batch(() => {
-					if (parsed.stages.length) stages.set(parsed.stages);
-					if (parsed.projects.length) projects.set(parsed.projects);
-					cards.set(parsed.cards);
-					cols.set(makeCols(projects.peek(), stages.peek()));
-				});
+				applyBoard(parsed, 'paste markdown');
 				document.getElementById('vault-modal').classList.remove('open');
 				showToast(`Pasted ${parsed.cards.length} cards`);
 			} else {
@@ -793,7 +737,6 @@ function wireUpGlobalEvents() {
 			stages.set([]);
 			projects.set([]);
 			cards.set([]);
-			cols.set([]);
 		});
 		_undoStack.length = 0;
 		_redoStack.length = 0;
@@ -984,10 +927,6 @@ function setupChipInput(inputId, containerId, prefix) {
 }
 
 // ══════════════════════════════════════════════════════════════
-//  Obsidian Kanban format serialiser/parser
-// ══════════════════════════════════════════════════════════════
-
-// ══════════════════════════════════════════════════════════════
 //  CSV Export
 // ══════════════════════════════════════════════════════════════
 
@@ -999,11 +938,12 @@ function exportToCsv() {
 	const rows = [header.join(',')];
 	for (const c of allCards) {
 		const proj = projs.find(p => p.id === c.projectId);
-		const stg = stgs.find(s => c.columnId.endsWith(s.id));
+		const stageId = parseColId(c.columnId).stageId;
+		const stg = stgs.find(s => s.id === stageId);
 		const row = [
 			`"${(c.title || '').replace(/"/g, '""')}"`,
-			`"${proj?.name || 'Inbox'}"`,
-			`"${stg?.name || ''}"`,
+			`"${(proj?.name || 'Inbox').replace(/"/g, '""')}"`,
+			`"${(stg?.name || '').replace(/"/g, '""')}"`,
 			c.done ? 'TRUE' : 'FALSE',
 			c.type,
 			`"${(c.assignees || []).join(', ')}"`,
@@ -1073,7 +1013,7 @@ function importFromCsv(text) {
 		}
 
 		if (stageName && !stageSet.has(stageName.toLowerCase())) {
-			const sid = stageName.toLowerCase().replace(/\s+/g, '-');
+			const sid = uniqueStageId(stageName, new Set([...stageSet.values()].map(s => s.id)));
 			const isDone = /^(done|complete|finished)$/i.test(stageName);
 			stageSet.set(stageName.toLowerCase(), {
 				id: sid, name: stageName,
@@ -1083,13 +1023,11 @@ function importFromCsv(text) {
 		}
 
 		const proj = isInbox ? null : swimlaneMap.get(swimName);
-		const stageId = stageName ? stageName.toLowerCase().replace(/\s+/g, '-') : (defaultStages[0]?.id || 'backlog');
-		const colId = isInbox ? 'inbox-col' : `col-${proj.id}-${stageId}`;
 		const projId = isInbox ? 'inbox' : proj.id;
 
 		allCards.push({
-			id: 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
-			title, columnId: colId, projectId: projId, order: i,
+			id: newCardId(), _stageKey: stageName.toLowerCase(),
+			title, columnId: 'inbox-col', projectId: projId, order: i,
 			done, type: ['task','meeting','followup'].includes(type) ? type : 'task',
 			assignees, labels, notes,
 			startDate: startDate && /\d{4}-\d{2}-\d{2}/.test(startDate) ? startDate : null,
@@ -1100,6 +1038,13 @@ function importFromCsv(text) {
 
 	const newStages = stageSet.size > 0 ? [...stageSet.values()] : defaultStages;
 	const newProjects = [...swimlaneMap.values()];
+	// Resolve columns once the stage list is known: rows without a stage go to its first stage
+	for (const c of allCards) {
+		const stageId = stageSet.get(c._stageKey)?.id || newStages[0]?.id;
+		if (c.projectId !== 'inbox' && stageId) c.columnId = `col-${c.projectId}-${stageId}`;
+		else { c.projectId = 'inbox'; c.columnId = 'inbox-col'; }
+		delete c._stageKey;
+	}
 
 	pushUndo('import CSV');
 	batch(() => {
@@ -1209,7 +1154,6 @@ function applyTemplate(key) {
 			stages.set(demo.stages);
 			projects.set(demo.projects);
 			cards.set(demo.cards);
-			cols.set(makeCols(demo.projects, demo.stages));
 			filterStr.set('');
 		});
 		document.getElementById('vault-modal').classList.remove('open');
@@ -1224,22 +1168,15 @@ function applyTemplate(key) {
 	const stageMap = buildStageMap(oldStages, tpl);
 
 	batch(() => {
-		stages.set(structuredClone(tpl));
-		const fallback = tpl[0]?.id;
+		// Remap cards first — parseColId resolves against the old stages
 		cards.update(all => all.map(c => {
 			if (c.projectId === 'inbox') return c;
-			const oldStageId = c.columnId.split('-').pop();
-			const newStageId = stageMap.get(oldStageId);
-			if (newStageId) {
-				return { ...c, columnId: c.columnId.replace(/-[^-]+$/, '-' + newStageId) };
-			}
+			const newStageId = stageMap.get(parseColId(c.columnId).stageId);
+			if (newStageId) return { ...c, columnId: `col-${c.projectId}-${newStageId}` };
 			// Unmatched → inbox
 			return { ...c, columnId: 'inbox-col', projectId: 'inbox' };
 		}));
-		const projs = projects.peek();
-		cols.set(projs.flatMap(p => tpl.map(s => ({
-			id: `col-${p.id}-${s.id}`, name: s.name, pId: p.id, stage: s.id, wip: 0,
-		}))));
+		stages.set(structuredClone(tpl));
 	});
 	document.getElementById('vault-modal').classList.remove('open');
 	showToast(`Applied "${key}" template — Ctrl+Z to undo`);
@@ -1344,11 +1281,11 @@ function showBulkBar() {
 		<span class="bulk-bar__count">${selectedCards.size}</span>
 		<select id="bulk-move-project" title="Move to swimlane">
 			<option value="">Swimlane…</option>
-			${projects.peek().map(p => `<option value="${p.id}">${escHtml(p.name)}</option>`).join('')}
+			${projects.peek().map(p => `<option value="${escHtml(p.id)}">${escHtml(p.name)}</option>`).join('')}
 		</select>
 		<select id="bulk-move-stage" title="Move to stage">
 			<option value="">Stage…</option>
-			${stages.peek().map(s => `<option value="${s.id}">${escHtml(s.name)}</option>`).join('')}
+			${stages.peek().map(s => `<option value="${escHtml(s.id)}">${escHtml(s.name)}</option>`).join('')}
 		</select>
 		<button class="bulk-icon-btn bulk-icon-btn--danger" id="bulk-delete" title="Delete">${ICON_TRASH}</button>
 		<button class="bulk-icon-btn" id="bulk-done" title="Mark done">${ICON_CHECK_SQUARE}</button>
@@ -1364,7 +1301,7 @@ function showBulkBar() {
 		batch(() => {
 			cards.update(all => all.map(c => {
 				if (!selectedCards.has(c.id)) return c;
-				const stageId = c.columnId.split('-').pop();
+				const stageId = parseColId(c.columnId).stageId || stages.peek()[0]?.id; // inbox cards land in the first stage
 				return { ...c, projectId: projId, columnId: `col-${projId}-${stageId}`, _v: Date.now() };
 			}));
 		});
@@ -1472,6 +1409,10 @@ function clearSelection() {
 }
 
 
+// ══════════════════════════════════════════════════════════════
+//  Obsidian Kanban format serialiser/parser
+// ══════════════════════════════════════════════════════════════
+
 function exportToObsidian() {
 	const md = serializeBoardMd();
 	const blob = new Blob([md], { type: 'text/markdown' });
@@ -1494,12 +1435,14 @@ function serializeBoardMd() {
 	md += 'kanban-plugin: detrita\n';
 	md += 'detrita: v1\n';
 	md += 'stages:\n';
+	// JSON strings are valid YAML double-quoted scalars, so names may hold commas and quotes
+	const q = JSON.stringify;
 	for (const s of stgs) {
-		md += `  - { id: "${s.id}", label: "${s.name}", color: "${s.color}"${s.done ? ', done: true' : ''}${s.automove ? ', automove: true' : ''} }\n`;
+		md += `  - { id: ${q(s.id)}, label: ${q(s.name)}, color: ${q(s.color)}${s.done ? ', done: true' : ''}${s.automove ? ', automove: true' : ''} }\n`;
 	}
 	md += 'swimlanes:\n';
 	for (const p of projs) {
-		md += `  - { id: "${p.id}", label: "${p.name}", color: "${p.color}"${p.collapsed ? ', collapsed: true' : ''} }\n`;
+		md += `  - { id: ${q(p.id)}, label: ${q(p.name)}, color: ${q(p.color)}${p.collapsed ? ', collapsed: true' : ''} }\n`;
 	}
 	md += '---\n\n';
 
@@ -1507,54 +1450,29 @@ function serializeBoardMd() {
 	for (const s of stgs) {
 		md += `## ${s.done ? '✓ ' : ''}${s.name}\n\n`;
 		for (const p of projs) {
-			const colId = `col-${p.id}-${s.id}`;
-			const cc = colCards.get(colId) ?? [];
+			const cc = colCards.get(`col-${p.id}-${s.id}`) ?? [];
 			if (cc.length === 0 && projs.length > 1) continue;
-			md += `### ${p.name}\n\n`;
-			for (const c of cc) {
-				const check = c.done ? 'x' : ' ';
-				let line = `- [${check}] ${c.title}`;
-				for (const a of c.assignees) line += ` @${a}`;
-				for (const l of c.labels) line += ` #${l}`;
-				if (c.type === 'meeting') line += ' $meeting';
-				if (c.type === 'followup') line += ' $followup';
-				if (c.startDate) line += ` start:${c.startDate}`;
-				if (c.dueDate) line += ` due:${c.dueDate}`;
-				line += ` ^${c.id}`;
-				md += line + '\n';
-				if (c.notes) {
-					for (const nl of c.notes.split('\n')) {
-						md += `  ${nl}\n`;
-					}
-				}
-			}
-			md += '\n';
+			md += `### ${p.name}\n\n${cc.map(cardToMd).join('')}\n`;
 		}
 	}
 
 	// Inbox
 	const inboxCards = colCards.get('inbox-col') ?? [];
-	if (inboxCards.length > 0) {
-		md += '## Inbox\n\n';
-		for (const c of inboxCards) {
-			const check = c.done ? 'x' : ' ';
-			let line = `- [${check}] ${c.title}`;
-			for (const a of c.assignees) line += ` @${a}`;
-			for (const l of c.labels) line += ` #${l}`;
-			if (c.type === 'meeting') line += ' $meeting';
-			if (c.type === 'followup') line += ' $followup';
-			if (c.dueDate) line += ` due:${c.dueDate}`;
-			line += ` ^${c.id}`;
-			md += line + '\n';
-			if (c.notes) {
-				for (const nl of c.notes.split('\n')) {
-					md += `  ${nl}\n`;
-				}
-			}
-		}
-	}
+	if (inboxCards.length > 0) md += `## Inbox\n\n${inboxCards.map(cardToMd).join('')}`;
 
 	return md;
+}
+
+// One frontmatter list item, `- { id: "x", label: "A, \\"B\\"", done: true }` → { id, label, done }.
+// Values are JSON-style quoted strings or bare words (older files quote without escaping).
+function parseFmItem(line) {
+	const out = {};
+	for (const m of line.matchAll(/(\w+):\s*("(?:[^"\\]|\\.)*"|[^,}]+)/g)) {
+		let v = m[2].trim();
+		if (v.startsWith('"')) { try { v = JSON.parse(v); } catch (_) { v = v.slice(1, -1); } }
+		out[m[1]] = v;
+	}
+	return out;
 }
 
 function parseBoardMd(text) {
@@ -1562,31 +1480,18 @@ function parseBoardMd(text) {
 
 	// Parse YAML frontmatter
 	let fmStages = [], fmSwimlanes = [];
-	let inFrontmatter = false;
 	let fmEnd = 0;
 	if (lines[0]?.trim() === '---') {
-		inFrontmatter = true;
 		for (let i = 1; i < lines.length; i++) {
 			if (lines[i].trim() === '---') { fmEnd = i + 1; break; }
-			const stageMatch = lines[i].match(/^\s+-\s*\{\s*id:\s*"?([^",]+)"?,\s*label:\s*"?([^",]+)"?,\s*color:\s*"?([^",]+)"?(?:,\s*done:\s*(true))?/);
-			if (stageMatch && lines[i - 1]?.trim() === 'stages:' || fmStages.length > 0 && !lines[i].startsWith('swimlanes:')) {
-				// Check context
-			}
 		}
-		// Simpler re-parse
 		const fmText = lines.slice(1, fmEnd - 1).join('\n');
-		const stagesBlock = fmText.match(/stages:\n((?:\s+-[^\n]+\n?)*)/);
-		if (stagesBlock) {
-			for (const m of stagesBlock[1].matchAll(/id:\s*"?([^",}]+)"?,\s*label:\s*"?([^",}]+)"?,\s*color:\s*"?([^",}]+)"?(?:,\s*done:\s*(true))?(?:,\s*automove:\s*(true))?(?:,\s*collapsed:\s*(true))?/g)) {
-				fmStages.push({ id: m[1].trim(), name: m[2].trim(), color: m[3].trim(), done: !!m[4], automove: !!m[5] });
-			}
-		}
-		const swimBlock = fmText.match(/swimlanes:\n((?:\s+-[^\n]+\n?)*)/);
-		if (swimBlock) {
-			for (const m of swimBlock[1].matchAll(/id:\s*"?([^",}]+)"?,\s*label:\s*"?([^",}]+)"?,\s*color:\s*"?([^",}]+)"?(?:,\s*done:\s*(true))?(?:,\s*collapsed:\s*(true))?/g)) {
-				fmSwimlanes.push({ id: m[1].trim(), name: m[2].trim(), color: m[3].trim(), collapsed: !!m[5] });
-			}
-		}
+		const items = (key) => {
+			const block = fmText.match(new RegExp(`${key}:\\n((?:\\s+-[^\\n]+\\n?)*)`));
+			return block ? block[1].split('\n').map(parseFmItem).filter(o => o.id && o.label) : [];
+		};
+		fmStages = items('stages').map(o => ({ id: o.id, name: o.label, color: o.color || '#7a5040', done: o.done === 'true', automove: o.automove === 'true' }));
+		fmSwimlanes = items('swimlanes').map(o => ({ id: o.id, name: o.label, color: o.color || '#2b4abd', collapsed: o.collapsed === 'true' }));
 	}
 
 	// Parse markdown body
@@ -1594,6 +1499,7 @@ function parseBoardMd(text) {
 	const swimMap = new Map(fmSwimlanes.map(s => [s.name, s]));
 	const allCards = [];
 	let currentStage = null;
+	let inInbox = false;
 	let currentSwim = null;
 	let lastCard = null;
 	let cardOrder = 0;
@@ -1604,10 +1510,12 @@ function parseBoardMd(text) {
 		const h2 = line.match(/^##\s+(.+)/);
 		if (h2) {
 			const name = h2[1].trim().replace(/^✓\s*/, '');
-			currentStage = stageMap.get(name)?.id || name.toLowerCase().replace(/\s+/g, '-');
-			if (!stageMap.has(name)) {
-				const isDone = name.toLowerCase() === 'done';
-				fmStages.push({ id: currentStage, name, color: '#7a5040', done: isDone });
+			// "## Inbox" is the inbox, not a stage — unless the board really has a stage by that name
+			inInbox = name.toLowerCase() === 'inbox' && !stageMap.has(name);
+			currentStage = inInbox ? null : stageMap.get(name)?.id;
+			if (!inInbox && !currentStage) {
+				currentStage = uniqueStageId(name, new Set(fmStages.map(s => s.id)));
+				fmStages.push({ id: currentStage, name, color: '#7a5040', done: name.toLowerCase() === 'done' });
 				stageMap.set(name, fmStages[fmStages.length - 1]);
 			}
 			currentSwim = null;
@@ -1633,75 +1541,15 @@ function parseBoardMd(text) {
 			continue;
 		}
 
-		// Card line
-		const taskMatch = line.match(/^-\s+\[([ xX])\]\s+(.+)/);
-		if (taskMatch && currentStage) {
-			const done = taskMatch[1] !== ' ';
-			let rest = taskMatch[2];
-			const assignees = [];
-			const labels = [];
-			let dueDate = null, startDate = null, blockId = null;
-			let type = 'task';
-
-			const idMatch = rest.match(/\s*\^(\S+)\s*$/);
-			if (idMatch) { blockId = idMatch[1]; rest = rest.replace(idMatch[0], ''); }
-
-			const dueMatch = rest.match(/(?:📅\s*|due:)(\d{4}-\d{2}-\d{2})/);
-			if (dueMatch) { dueDate = dueMatch[1]; rest = rest.replace(dueMatch[0], ''); }
-			const startMatch = rest.match(/(?:⏳\s*|start:)(\d{4}-\d{2}-\d{2})/);
-			if (startMatch) { startDate = startMatch[1]; rest = rest.replace(startMatch[0], ''); }
-
-			if (/\$meeting/.test(rest)) { type = 'meeting'; rest = rest.replace(/\$meeting/g, ''); }
-			if (/\$followup/.test(rest)) { type = 'followup'; rest = rest.replace(/\$followup/g, ''); }
-
-			rest = rest.replace(/@(\w+)/g, (_, name) => { assignees.push(name); return ''; });
-			rest = rest.replace(/#(\w+)/g, (_, label) => { labels.push(label); return ''; });
-			const title = rest.trim();
-
-			const isInbox = currentStage === 'inbox';
-			const projId = isInbox ? 'inbox' : (currentSwim?.id || fmSwimlanes[0]?.id || 'p1');
-			const colId = isInbox ? 'inbox-col' : `col-${projId}-${currentStage}`;
-			const cardId = blockId || ('c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5));
-
+		// Card line (task or bare list item)
+		const parsed = (currentStage || inInbox) && parseCardLine(line);
+		if (parsed) {
+			const { blockId, ...fields } = parsed;
+			const projId = inInbox ? 'inbox' : (currentSwim?.id || fmSwimlanes[0]?.id || 'p1');
 			lastCard = {
-				id: cardId, title, columnId: colId, projectId: projId,
-				order: cardOrder++, done, type, assignees, labels,
-				notes: '', startDate, dueDate, _v: Date.now(), _created: Date.now(),
-			};
-			allCards.push(lastCard);
-			continue;
-		}
-
-		// Bare list item (no checkbox)
-		const bareMatch = line.match(/^-\s+(.+)/);
-		if (bareMatch && currentStage) {
-			let rest = bareMatch[1];
-			const assignees = [];
-			const labels = [];
-			let dueDate = null, startDate = null, blockId = null;
-			let type = 'task';
-
-			const idMatch = rest.match(/\s*\^(\S+)\s*$/);
-			if (idMatch) { blockId = idMatch[1]; rest = rest.replace(idMatch[0], ''); }
-			const dueMatch = rest.match(/(?:📅\s*|due:)(\d{4}-\d{2}-\d{2})/);
-			if (dueMatch) { dueDate = dueMatch[1]; rest = rest.replace(dueMatch[0], ''); }
-			const startMatch = rest.match(/(?:⏳\s*|start:)(\d{4}-\d{2}-\d{2})/);
-			if (startMatch) { startDate = startMatch[1]; rest = rest.replace(startMatch[0], ''); }
-			if (/\$meeting/.test(rest)) { type = 'meeting'; rest = rest.replace(/\$meeting/g, ''); }
-			if (/\$followup/.test(rest)) { type = 'followup'; rest = rest.replace(/\$followup/g, ''); }
-			rest = rest.replace(/@(\w+)/g, (_, name) => { assignees.push(name); return ''; });
-			rest = rest.replace(/#(\w+)/g, (_, label) => { labels.push(label); return ''; });
-			const title = rest.trim();
-
-			const isInbox = currentStage === 'inbox';
-			const projId = isInbox ? 'inbox' : (currentSwim?.id || fmSwimlanes[0]?.id || 'p1');
-			const colId = isInbox ? 'inbox-col' : `col-${projId}-${currentStage}`;
-			const cardId = blockId || ('c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5));
-
-			lastCard = {
-				id: cardId, title, columnId: colId, projectId: projId,
-				order: cardOrder++, done: false, type, assignees, labels,
-				notes: '', startDate, dueDate, _v: Date.now(), _created: Date.now(),
+				id: blockId || newCardId(), ...fields,
+				columnId: inInbox ? 'inbox-col' : `col-${projId}-${currentStage}`, projectId: projId,
+				order: cardOrder++, notes: '', _v: Date.now(), _created: Date.now(),
 			};
 			allCards.push(lastCard);
 			continue;
@@ -1734,6 +1582,39 @@ function parseBoardMd(text) {
 	return { stages: fmStages, projects: fmSwimlanes, cards: allCards };
 }
 
+// Fill in any fields an imported card lacks, so rendering never trips over a missing array.
+function normalizeCard(c) {
+	return {
+		title: '', order: 0, done: false, type: 'task', notes: '', startDate: null, dueDate: null,
+		...c,
+		id: String(c.id),
+		assignees: Array.isArray(c.assignees) ? c.assignees.map(String) : [],
+		labels: Array.isArray(c.labels) ? c.labels.map(String) : [],
+	};
+}
+
+// Replace the board with parsed, imported or saved data. Cards that already exist keep their
+// creation time, so a sync or re-import doesn't reset every card's age.
+function applyBoard(data, action) {
+	if (action) pushUndo(action);
+	const prev = cardMap.peek();
+	batch(() => {
+		if (data.stages?.length) stages.set(data.stages);
+		if (data.projects?.length) projects.set(data.projects);
+		cards.set((Array.isArray(data.cards) ? data.cards : []).filter(c => c?.id != null && c.columnId).map(c => {
+			const card = normalizeCard(c);
+			const old = prev.get(card.id);
+			return old?._created ? { ...card, _created: old._created } : card;
+		}));
+	});
+}
+
+// Move matching cards to the end of the inbox, keeping their relative order.
+function moveCardsToInbox(pred) {
+	let order = cardsByColumn.peek().get('inbox-col')?.length ?? 0;
+	cards.update(all => all.map(c => pred(c) ? { ...c, columnId: 'inbox-col', projectId: 'inbox', order: order++ } : c));
+}
+
 // ══════════════════════════════════════════════════════════════
 //  FileSync — File System Access API + change detection
 // ══════════════════════════════════════════════════════════════
@@ -1760,14 +1641,15 @@ class FileSync {
 				suggestedName: 'board.md',
 				types: [{ description: 'Markdown', accept: { 'text/markdown': ['.md'] } }],
 			});
-			await this._readFromFile();
-			this._enabled = true;
+			this._enabled = true; // before reading, so an empty file gets the board written to it
+			await this._readFromFile(false);
 			this._startPolling();
 			this._persistHandle();
 			this._updateUI(true);
 			showToast('Syncing to ' + this._handle.name);
 			return true;
 		} catch (e) {
+			this._enabled = false;
 			if (e.name !== 'AbortError') showToast('File sync failed');
 			return false;
 		}
@@ -1783,13 +1665,14 @@ class FileSync {
 		try {
 			const perm = await this._handle.requestPermission({ mode: 'readwrite' });
 			if (perm !== 'granted') { showToast('Permission denied'); return false; }
-			await this._readFromFile();
 			this._enabled = true;
+			await this._readFromFile(true);
 			this._startPolling();
 			this._updateUI(true);
 			showToast('Reconnected to ' + this._handle.name);
 			return true;
 		} catch (e) {
+			this._enabled = false;
 			showToast('Reconnect failed');
 			return false;
 		}
@@ -1804,21 +1687,20 @@ class FileSync {
 		showToast('File sync disconnected');
 	}
 
-	async _readFromFile() {
+	// On reconnect (`keepNewer`), the board edited here since the file was last written wins;
+	// otherwise — or if the file changed more recently — the file's content is loaded.
+	async _readFromFile(keepNewer) {
 		const file = await this._handle.getFile();
 		const text = await file.text();
 		this._lastModTime = file.lastModified;
 		this._lastHash = await this._hash(text);
 
-		if (text.trim()) {
-			const parsed = parseBoardMd(text);
-			batch(() => {
-				stages.set(parsed.stages);
-				projects.set(parsed.projects);
-				cards.set(parsed.cards);
-			});
+		let localModified = 0;
+		try { localModified = Number(localStorage.getItem(LOCAL_MODIFIED_KEY)) || 0; } catch (_) {}
+		if (text.trim() && !(keepNewer && localModified > file.lastModified)) {
+			applyBoard(parseBoardMd(text), 'load from file');
 		} else {
-			// New/empty file — write current board to it
+			// New/empty file, or local edits newer than the file — write the current board to it
 			await this.save();
 		}
 	}
@@ -1826,6 +1708,7 @@ class FileSync {
 	async save() {
 		if (!this._enabled || !this._handle || this._saving) return;
 		this._saving = true;
+		this._dirty = false; // cleared before serialising, so edits made during the write stay dirty
 		try {
 			const md = serializeBoardMd();
 			const hash = await this._hash(md);
@@ -1836,8 +1719,8 @@ class FileSync {
 			await writable.close();
 			this._lastHash = hash;
 			this._lastModTime = Date.now();
-			this._dirty = false;
 		} catch (e) {
+			this._dirty = true;
 			console.warn('File sync save failed:', e);
 			showToast('Sync save failed');
 		}
@@ -1886,12 +1769,7 @@ class FileSync {
 			if (hash === this._lastHash) return;
 
 			// External change detected
-			const parsed = parseBoardMd(text);
-			batch(() => {
-				stages.set(parsed.stages);
-				projects.set(parsed.projects);
-				cards.set(parsed.cards);
-			});
+			applyBoard(parseBoardMd(text), 'sync from disk');
 			this._lastHash = hash;
 			this._lastModTime = file.lastModified;
 			showToast('Board updated from disk');
@@ -1965,11 +1843,7 @@ function importFromObsidian(file) {
 		try {
 			const text = e.target.result;
 			const parsed = parseBoardMd(text);
-			batch(() => {
-				stages.set(parsed.stages);
-				projects.set(parsed.projects);
-				cards.set(parsed.cards);
-			});
+			applyBoard(parsed, 'import markdown');
 			document.getElementById('vault-modal').classList.remove('open');
 			showToast(`Imported ${parsed.cards.length} cards`);
 		} catch (err) {
@@ -1992,7 +1866,10 @@ function toggleTheme() {
 	document.getElementById('icon-sun').style.display = isDark ? 'none' : '';
 	document.querySelector('meta[name="theme-color"]').content = isDark ? '#e3dedb' : '#2b0000';
 	try { localStorage.setItem('detrita-theme', html.dataset.theme); } catch (_) {}
+	// Avatar/label colours depend on the theme but aren't part of the card signature,
+	// so drop the cached HTML and each card's signature to force a repaint.
 	_cardHtmlCache.clear();
+	document.querySelectorAll('.card[data-card-id]').forEach(el => { el._sig = null; });
 	renderBoard();
 	renderInbox();
 	requestAnimationFrame(() => s.remove());

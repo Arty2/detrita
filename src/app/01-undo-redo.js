@@ -124,27 +124,18 @@ function escHtml(s) {
 	return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
-function avatarColor(name) {
+// The rendered element for a card id (ids come from imported files, so escape them for the selector).
+function cardEl(id) {
+	return document.querySelector(`.card[data-card-id="${CSS.escape(id)}"]`);
+}
+
+// Stable per-name hue for assignee avatars and labels.
+function nameColor(name) {
 	let h = 0;
 	for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) & 0x7fffffff;
 	const hue = h % 360;
 	const isDark = document.documentElement.dataset.theme === 'dark';
 	return isDark ? `oklch(0.72 0.14 ${hue})` : `oklch(0.52 0.14 ${hue})`;
-}
-
-function labelColor(name) {
-	let h = 0;
-	for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) & 0x7fffffff;
-	const hue = h % 360;
-	const isDark = document.documentElement.dataset.theme === 'dark';
-	return isDark ? `oklch(0.72 0.14 ${hue})` : `oklch(0.52 0.14 ${hue})`;
-}
-
-function avatarHtml(assignees) {
-	if (!assignees.length) return '';
-	return `<div class="card__assignees">${assignees.map(a =>
-		`<span class="card__avatar" style="color:${avatarColor(a)};border:1.5px solid ${avatarColor(a)}" title="${escHtml(a)}">${escHtml(a.charAt(0).toUpperCase())}</span>`
-	).join('')}</div>`;
 }
 
 function isOverdue(card) {
@@ -252,7 +243,7 @@ function cardSig(c, stageDone, vis, projColor) {
 	const selected = selectedCards.has(c.id) ? 1 : 0;
 	const future = !done && c.startDate && c.startDate > NOW_STR ? 1 : 0;
 	const ageCls = cardAgeCls(c);
-	return `${c.id}|${c.title}|${done}|${c.type}|${overdue}|${filtered}|${projColor}|${c.labels.join(',')}|${c.dueDate||''}|${c.startDate||''}|${(c.assignees||[]).join(',')}|${c.notes||''}|${moved}|${ageCls}|${c._created||0}|${selected}|${future}`;
+	return `${c.id}|${c.title}|${done}|${c.type}|${overdue}|${filtered}|${projColor}|${c.labels.join(',')}|${c.dueDate||''}|${c.startDate||''}|${(c.assignees||[]).join(',')}|${c.notes||''}|${moved}|${ageCls}|${c._created||0}|${selected}|${future}|${NOW_STR}`;
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -288,14 +279,17 @@ function cardInnerHTML(c, stageDone, vis) {
 	}
 	if (c.labels.length) {
 		h += '<div class="card__meta">';
-		for (const l of c.labels) h += `<span class="card__label" style="color:${labelColor(l)}">${escHtml(l)}</span>`;
+		for (const l of c.labels) h += `<span class="card__label" style="color:${nameColor(l)}">${escHtml(l)}</span>`;
 		h += '</div>';
 	}
 	if (moved) h += '<span class="card__age age-moved"></span>';
 	else if (c._created && ageCls) h += `<span class="card__age ${ageCls}" title="${cardAgeDays(c)}d old"></span>`;
 	if (c.assignees.length) {
 		h += '<div class="card__assignees">';
-		for (const a of c.assignees) h += `<span class="card__avatar" style="color:${avatarColor(a)};border:1.5px solid ${avatarColor(a)}" title="${escHtml(a)}">${escHtml(a.charAt(0).toUpperCase())}</span>`;
+		for (const a of c.assignees) {
+			const col = nameColor(a);
+			h += `<span class="card__avatar" style="color:${col};border:1.5px solid ${col}" title="${escHtml(a)}">${escHtml(a.charAt(0).toUpperCase())}</span>`;
+		}
 		h += '</div>';
 	}
 	return h;
@@ -404,6 +398,8 @@ function updateColumnWidth() {
 	document.documentElement.style.setProperty('--cw', optimalCw + 'px');
 }
 
+let _lastNavFilter = '';
+
 function renderBoard() {
 	const board = $('board');
 	const stgs = stages.get();
@@ -445,7 +441,7 @@ function renderBoard() {
 		patch(el, d) {
 			const stgs = d.stgs;
 			let h = `<div class="proj-drop-zone-label" id="add-project-btn" title="Add swimlane">${ICON_PLUS}</div><div class="proj-drop-zone-cols">`;
-			for (const s of stgs) h += `<div class="proj-drop-zone-cell" data-proj-drop-stage="${s.id}"></div>`;
+			for (const s of stgs) h += `<div class="proj-drop-zone-cell" data-proj-drop-stage="${escHtml(s.id)}"></div>`;
 			h += '<div class="proj-drop-zone-col-end"></div></div>';
 			if (el.innerHTML !== h) el.innerHTML = h;
 		},
@@ -473,8 +469,13 @@ function renderBoard() {
 		msg.remove();
 	}
 
-	// Filter navigation
-	if (vis && vis.size > 0) {
+	// Filter navigation — jump to the first match only when the filter itself changes,
+	// not on every re-render (otherwise edits made while filtering steal focus).
+	const filterChanged = filterStr.peek() !== _lastNavFilter;
+	_lastNavFilter = filterStr.peek();
+	if (!filterChanged) {
+		updateFilterNavState();
+	} else if (vis && vis.size > 0) {
 		clearCountHighlights();
 		requestAnimationFrame(() => {
 			const entries = getNavigableEntries();
@@ -486,11 +487,11 @@ function renderBoard() {
 			} else if (first.projId === 'inbox') {
 				if (!inboxOpen.peek()) inboxOpen.set(true);
 				requestAnimationFrame(() => {
-					const el = document.querySelector(`.card[data-card-id="${first.cardId}"]`);
+					const el = cardEl(first.cardId);
 					if (el) { el.focus(); el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' }); }
 				});
 			} else {
-				const el = document.querySelector(`.card[data-card-id="${first.cardId}"]`);
+				const el = cardEl(first.cardId);
 				if (el) { el.focus(); el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' }); }
 			}
 			updateFilterNavState();

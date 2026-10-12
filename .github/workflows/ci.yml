@@ -24,9 +24,9 @@ jobs:
 
       - name: Verify committed build output is up to date
         run: |
-          if ! git diff --quiet -- detrita.html index.html; then
+          if ! git diff --quiet -- detrita.html index.html sw.js; then
             echo "::error::Build output is stale. Run \`node build.js\` and commit the result."
-            git --no-pager diff -- detrita.html index.html
+            git --no-pager diff -- detrita.html index.html sw.js
             exit 1
           fi
 

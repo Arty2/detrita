@@ -129,8 +129,6 @@
 		color: var(--text);
 	}
 	.brand-svg { width: 26px; height: 22px; }
-	.brand-full { display: none; }
-	.brand-abbr { display: none; }
 	.brand.drop-hover { background: var(--red-bg, rgba(200,40,40,0.1)); color: var(--red); }
 	.card.dragging.shrink-delete {
 		width: 30% !important;
@@ -1377,37 +1375,6 @@
 		margin-top: 16px;
 	}
 
-	/* ── Conflict Panel ── */
-.diff-side {
-		flex: 1;
-		padding: 16px;
-		background: var(--surface);
-	}
-	.diff-label {
-		font-family: var(--sans);
-		font-size: 11px;
-		font-weight: 700;
-		text-transform: uppercase;
-		letter-spacing: 0.5px;
-		color: var(--muted);
-		margin-bottom: 12px;
-	}
-	.diff-field { margin-bottom: 12px; }
-	.diff-field-name {
-		font-size: 10px;
-		color: var(--muted);
-		display: block;
-		margin-bottom: 2px;
-	}
-	.diff-value {
-		font-size: 13px;
-		color: var(--text);
-	}
-	.diff-value--highlight {
-		background: var(--yellow-bg);
-		padding: 2px 4px;
-		border-radius: 2px;
-	}
 /* ── Help Panel (slide-in from right) ── */
 	.help-backdrop {
 		position: fixed;
@@ -2156,7 +2123,7 @@ body.print-preview .sw-colorbar { background: #999 !important; }
 			<li>Project page: <a href="https://heracl.es/detrita" target="_blank" rel="noopener" class="help-link">heracl.es/detrita</a></li>
 			<li>Demo: <a href="https://detrita.vercel.app/" target="_blank" rel="noopener" class="help-link">detrita.vercel.app</a></li>
 			<li>Source: <a href="https://github.com/arty2/detrita" target="_blank" rel="noopener" class="help-link">github.com/arty2/detrita</a></li>
-			<li>Current version: 0.85.0 (2026-08-05)</li>
+			<li>Current version: 0.86.0 (2026-10-12)</li>
 		</ul>
 		<h4>Mental model</h4>
 		<p class="help-desc">
@@ -2278,11 +2245,8 @@ body.print-preview .sw-colorbar { background: #999 !important; }
 				<button class="btn btn--danger" id="vault-reset" style="flex:1">Reset &amp; Clear</button>
 			</div>
 		</div>
-		<div id="vault-status" style="margin-top:12px;font-size:11px;color:var(--muted);display:none"></div>
 	</div>
 </div>
-
-<!-- ═══ Conflict Panel ═══ -->
 
 <!-- ═══ Toast Container ═══ -->
 <div class="toast-container" id="toast-container"></div>
@@ -2319,11 +2283,6 @@ function signal(initialValue) {
 		update(fn) {
 			s.set(fn(_value));
 		},
-		subscribe(fn) {
-			_subs.add(fn);
-			return () => _subs.delete(fn);
-		},
-		_subs,
 	};
 	return s;
 }
@@ -2334,6 +2293,7 @@ function computed(fn) {
 	const _subs = new Set();
 
 	const innerEffect = {
+		computed: true, // invalidate immediately, even inside batch(), so peek() is never stale
 		run() {
 			_dirty = true;
 			_notify(_subs);
@@ -2354,8 +2314,9 @@ function computed(fn) {
 		},
 		peek() {
 			if (_dirty) {
+				// Track dependencies (so later writes invalidate us) without subscribing the caller
 				const prev = _currentEffect;
-				_currentEffect = null;
+				_currentEffect = innerEffect;
 				try { _value = fn(); }
 				finally { _currentEffect = prev; }
 				_dirty = false;
@@ -2377,7 +2338,6 @@ function effect(fn) {
 		},
 	};
 	eff.run();
-	return () => { /* dispose — no-op for simplicity, effects auto-clean via WeakRef-style GC */ };
 }
 
 function batch(fn) {
@@ -2393,19 +2353,10 @@ function batch(fn) {
 	}
 }
 
-function untracked(fn) {
-	const prev = _currentEffect;
-	_currentEffect = null;
-	try { return fn(); }
-	finally { _currentEffect = prev; }
-}
-
-const peek = untracked;
-
 function _notify(subs) {
 	for (const sub of subs) {
 		if (typeof sub === 'object' && sub.run) {
-			if (_batchDepth > 0) _batchQueue.add(sub);
+			if (_batchDepth > 0 && !sub.computed) _batchQueue.add(sub);
 			else sub.run();
 		} else if (typeof sub === 'function') {
 			sub();
@@ -2455,31 +2406,49 @@ function setReorderIndicator(el) {
 	document.body.appendChild(el);
 }
 
-const deviceId = 'device-' + Math.random().toString(36).slice(2, 8);
-
 const stages = signal([]);
 const projects = signal([]);
-
-function makeCols(projs, stgs) {
-	const cols = [];
-	for (const p of projs) {
-		for (const s of stgs) {
-			cols.push({ id: `col-${p.id}-${s.id}`, name: s.name, pId: p.id, stage: s.id, wip: 0 });
-		}
-	}
-	return cols;
-}
-
-const cols = signal([]);
-
 const cards = signal([]);
 
-const NOW_STR = new Date().toISOString().slice(0, 10);
+// Column ids are `col-${projectId}-${stageId}`; either id may itself contain dashes,
+// so resolve them against the known stages instead of splitting on '-'.
+function parseColId(colId) {
+	if (!colId || colId === 'inbox-col') return { projectId: 'inbox', stageId: null };
+	let best = null;
+	for (const s of stages.peek()) {
+		if (!colId.endsWith('-' + s.id) || colId.length <= s.id.length + 5) continue;
+		const projectId = colId.slice(4, -(s.id.length + 1));
+		if (projects.peek().some(p => p.id === projectId)) return { projectId, stageId: s.id };
+		if (!best || s.id.length > best.stageId.length) best = { projectId, stageId: s.id };
+	}
+	if (best) return best;
+	const parts = colId.split('-');
+	return { projectId: parts.slice(1, -1).join('-') || 'inbox', stageId: parts[parts.length - 1] };
+}
+
+// Id derived from a display name: lowercase, dashes for spaces, nothing that needs escaping.
+function slugId(name) {
+	return String(name).toLowerCase().trim().replace(/\s+/g, '-').replace(/[^\w-]/g, '') || 'stage';
+}
+
+// Stage ids derived from names must stay unique on the board.
+function uniqueStageId(name, taken = new Set(stages.peek().map(s => s.id))) {
+	const base = slugId(name);
+	let id = base, n = 2;
+	while (taken.has(id)) id = `${base}-${n++}`;
+	return id;
+}
+
+// Local calendar date (YYYY-MM-DD) — date inputs are local, so don't use toISOString (UTC).
+function localDateStr(d = new Date()) {
+	return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+let NOW_STR = localDateStr();
 
 const filterStr = signal('');
 const inboxOpen = signal(false);
 
-const focusedCardId = signal(null);
 const filterPresets = signal([]); // [{name, query}]
 const selectedCards = new Set(); // for multi-select
 
@@ -2609,27 +2578,18 @@ function escHtml(s) {
 	return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
-function avatarColor(name) {
+// The rendered element for a card id (ids come from imported files, so escape them for the selector).
+function cardEl(id) {
+	return document.querySelector(`.card[data-card-id="${CSS.escape(id)}"]`);
+}
+
+// Stable per-name hue for assignee avatars and labels.
+function nameColor(name) {
 	let h = 0;
 	for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) & 0x7fffffff;
 	const hue = h % 360;
 	const isDark = document.documentElement.dataset.theme === 'dark';
 	return isDark ? `oklch(0.72 0.14 ${hue})` : `oklch(0.52 0.14 ${hue})`;
-}
-
-function labelColor(name) {
-	let h = 0;
-	for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) & 0x7fffffff;
-	const hue = h % 360;
-	const isDark = document.documentElement.dataset.theme === 'dark';
-	return isDark ? `oklch(0.72 0.14 ${hue})` : `oklch(0.52 0.14 ${hue})`;
-}
-
-function avatarHtml(assignees) {
-	if (!assignees.length) return '';
-	return `<div class="card__assignees">${assignees.map(a =>
-		`<span class="card__avatar" style="color:${avatarColor(a)};border:1.5px solid ${avatarColor(a)}" title="${escHtml(a)}">${escHtml(a.charAt(0).toUpperCase())}</span>`
-	).join('')}</div>`;
 }
 
 function isOverdue(card) {
@@ -2737,7 +2697,7 @@ function cardSig(c, stageDone, vis, projColor) {
 	const selected = selectedCards.has(c.id) ? 1 : 0;
 	const future = !done && c.startDate && c.startDate > NOW_STR ? 1 : 0;
 	const ageCls = cardAgeCls(c);
-	return `${c.id}|${c.title}|${done}|${c.type}|${overdue}|${filtered}|${projColor}|${c.labels.join(',')}|${c.dueDate||''}|${c.startDate||''}|${(c.assignees||[]).join(',')}|${c.notes||''}|${moved}|${ageCls}|${c._created||0}|${selected}|${future}`;
+	return `${c.id}|${c.title}|${done}|${c.type}|${overdue}|${filtered}|${projColor}|${c.labels.join(',')}|${c.dueDate||''}|${c.startDate||''}|${(c.assignees||[]).join(',')}|${c.notes||''}|${moved}|${ageCls}|${c._created||0}|${selected}|${future}|${NOW_STR}`;
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -2773,14 +2733,17 @@ function cardInnerHTML(c, stageDone, vis) {
 	}
 	if (c.labels.length) {
 		h += '<div class="card__meta">';
-		for (const l of c.labels) h += `<span class="card__label" style="color:${labelColor(l)}">${escHtml(l)}</span>`;
+		for (const l of c.labels) h += `<span class="card__label" style="color:${nameColor(l)}">${escHtml(l)}</span>`;
 		h += '</div>';
 	}
 	if (moved) h += '<span class="card__age age-moved"></span>';
 	else if (c._created && ageCls) h += `<span class="card__age ${ageCls}" title="${cardAgeDays(c)}d old"></span>`;
 	if (c.assignees.length) {
 		h += '<div class="card__assignees">';
-		for (const a of c.assignees) h += `<span class="card__avatar" style="color:${avatarColor(a)};border:1.5px solid ${avatarColor(a)}" title="${escHtml(a)}">${escHtml(a.charAt(0).toUpperCase())}</span>`;
+		for (const a of c.assignees) {
+			const col = nameColor(a);
+			h += `<span class="card__avatar" style="color:${col};border:1.5px solid ${col}" title="${escHtml(a)}">${escHtml(a.charAt(0).toUpperCase())}</span>`;
+		}
 		h += '</div>';
 	}
 	return h;
@@ -2889,6 +2852,8 @@ function updateColumnWidth() {
 	document.documentElement.style.setProperty('--cw', optimalCw + 'px');
 }
 
+let _lastNavFilter = '';
+
 function renderBoard() {
 	const board = $('board');
 	const stgs = stages.get();
@@ -2930,7 +2895,7 @@ function renderBoard() {
 		patch(el, d) {
 			const stgs = d.stgs;
 			let h = `<div class="proj-drop-zone-label" id="add-project-btn" title="Add swimlane">${ICON_PLUS}</div><div class="proj-drop-zone-cols">`;
-			for (const s of stgs) h += `<div class="proj-drop-zone-cell" data-proj-drop-stage="${s.id}"></div>`;
+			for (const s of stgs) h += `<div class="proj-drop-zone-cell" data-proj-drop-stage="${escHtml(s.id)}"></div>`;
 			h += '<div class="proj-drop-zone-col-end"></div></div>';
 			if (el.innerHTML !== h) el.innerHTML = h;
 		},
@@ -2958,8 +2923,13 @@ function renderBoard() {
 		msg.remove();
 	}
 
-	// Filter navigation
-	if (vis && vis.size > 0) {
+	// Filter navigation — jump to the first match only when the filter itself changes,
+	// not on every re-render (otherwise edits made while filtering steal focus).
+	const filterChanged = filterStr.peek() !== _lastNavFilter;
+	_lastNavFilter = filterStr.peek();
+	if (!filterChanged) {
+		updateFilterNavState();
+	} else if (vis && vis.size > 0) {
 		clearCountHighlights();
 		requestAnimationFrame(() => {
 			const entries = getNavigableEntries();
@@ -2971,11 +2941,11 @@ function renderBoard() {
 			} else if (first.projId === 'inbox') {
 				if (!inboxOpen.peek()) inboxOpen.set(true);
 				requestAnimationFrame(() => {
-					const el = document.querySelector(`.card[data-card-id="${first.cardId}"]`);
+					const el = cardEl(first.cardId);
 					if (el) { el.focus(); el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' }); }
 				});
 			} else {
-				const el = document.querySelector(`.card[data-card-id="${first.cardId}"]`);
+				const el = cardEl(first.cardId);
 				if (el) { el.focus(); el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' }); }
 			}
 			updateFilterNavState();
@@ -3011,7 +2981,7 @@ function patchStageRow(el, d) {
 			? `<svg width="12" height="12" stroke="var(--green)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"><use href="#i-check-sq"/></svg>`
 			: `<svg width="12" height="12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"><use href="#i-square"/></svg>`;
 		const autoIcon = s.automove ? ' →' : '';
-		h += `<div class="stage-cell" role="columnheader" data-stage-id="${s.id}"><button class="done-toggle" data-done-stage="${s.id}" title="${s.done ? 'Unmark as done column' : 'Mark as done column'}">${doneIcon}</button><span class="stage-name">${escHtml(s.name)}${autoIcon}</span><span class="stage-count${count === 0 ? ' count-hidden' : ''}">${count}</span><span class="sw-reorder-btn stage-drag" title="Drag to reorder">${ICON_DRAG}</span></div>`;
+		h += `<div class="stage-cell" role="columnheader" data-stage-id="${escHtml(s.id)}"><button class="done-toggle" data-done-stage="${escHtml(s.id)}" title="${s.done ? 'Unmark as done column' : 'Mark as done column'}">${doneIcon}</button><span class="stage-name">${escHtml(s.name)}${autoIcon}</span><span class="stage-count${count === 0 ? ' count-hidden' : ''}">${count}</span><span class="sw-reorder-btn stage-drag" title="Drag to reorder">${ICON_DRAG}</span></div>`;
 	}
 	h += `<div class="stage-cell-add stage-cell-add--header" title="Add stage">${ICON_PLUS}</div></div>`;
 	if (el._sig !== h) { el.innerHTML = h; el._sig = h; }
@@ -3039,7 +3009,8 @@ function patchSwimlane(el, d) {
 
 	// Label
 	let labelEl = el.querySelector(':scope > .sw-label');
-	const labelHtml = `<div class="sw-colorbar" style="background:${p.color}"></div><button class="sw-collapse" data-collapse="${p.id}" aria-label="${p.collapsed ? 'Expand' : 'Collapse'} ${escHtml(p.name)}">${ICON_CHEVRON}</button><span class="sw-name" style="color:${p.color}" data-proj-name="${p.id}">${escHtml(p.name)}</span><span class="sw-reorder-btn proj-drag" data-proj-drag="${p.id}" title="Drag to reorder">${ICON_DRAG}</span><span class="sw-total sw-total--expanded${projTotal === 0 ? ' count-hidden' : ''}">${projTotal}</span><span class="sw-total sw-total--collapsed${projTotal === 0 ? ' count-hidden' : ''}">(${projTotal})</span>`;
+	const pid = escHtml(p.id), color = escHtml(p.color);
+	const labelHtml = `<div class="sw-colorbar" style="background:${color}"></div><button class="sw-collapse" data-collapse="${pid}" aria-label="${p.collapsed ? 'Expand' : 'Collapse'} ${escHtml(p.name)}">${ICON_CHEVRON}</button><span class="sw-name" style="color:${color}" data-proj-name="${pid}">${escHtml(p.name)}</span><span class="sw-reorder-btn proj-drag" data-proj-drag="${pid}" title="Drag to reorder">${ICON_DRAG}</span><span class="sw-total sw-total--expanded${projTotal === 0 ? ' count-hidden' : ''}">${projTotal}</span><span class="sw-total sw-total--collapsed${projTotal === 0 ? ' count-hidden' : ''}">(${projTotal})</span>`;
 	if (!labelEl) {
 		labelEl = document.createElement('div');
 		labelEl.className = 'sw-label';
@@ -3347,6 +3318,38 @@ function _makeDragDot() {
 	return c;
 }
 
+// Create a swimlane / stage on the fly (drop or double-click on the "+" zones).
+function addSwimlane() {
+	const id = 'p' + Date.now().toString(36);
+	projects.update(all => [...all, { id, name: 'New swimlane', color: SWATCH_COLORS[all.length % SWATCH_COLORS.length], collapsed: false }]);
+	return id;
+}
+
+function addStage() {
+	const id = 'stage-' + Date.now().toString(36);
+	stages.update(all => [...all, { id, name: 'New stage', color: '#7a5040', done: false }]);
+	return id;
+}
+
+function dropIntoNewSwimlane(cardIds, stageId) {
+	pushUndo('new swimlane');
+	const projId = addSwimlane();
+	const target = stageId || stages.peek()[0]?.id;
+	if (target) for (const id of cardIds) moveCard(id, `col-${projId}-${target}`, null, true);
+	showToast('Created new swimlane');
+}
+
+function dropIntoNewStage(cardIds, rowProjId) {
+	pushUndo('new stage');
+	const stageId = addStage();
+	for (const id of cardIds) {
+		const c = cardMap.peek().get(id);
+		const projId = rowProjId || (c?.projectId && c.projectId !== 'inbox' ? c.projectId : projects.peek()[0]?.id);
+		if (projId) moveCard(id, `col-${projId}-${stageId}`, null, true);
+	}
+	showToast('Created new stage');
+}
+
 function initDragAndDrop() {
 	// Keep native DnD for mouse on desktop
 	document.addEventListener('dragstart', (e) => {
@@ -3396,7 +3399,7 @@ function initDragAndDrop() {
 			if (tempBadge) tempBadge.remove();
 			card.classList.add('dragging');
 			selectedCards.forEach(id => {
-				const el = document.querySelector(`.card[data-card-id="${id}"]`);
+				const el = cardEl(id);
 				if (el) el.classList.add('dragging');
 			});
 		});
@@ -3410,8 +3413,6 @@ function initDragAndDrop() {
 		clearHover();
 		clearIndicator();
 		document.querySelector('.inbox-toggle')?.classList.remove('drop-hover');
-		const badge = document.getElementById('drag-count-badge');
-		if (badge) { badge._cleanup?.(); badge.remove(); }
 	});
 
 	let _inboxDragTimer = null;
@@ -3463,27 +3464,15 @@ function initDragAndDrop() {
 			c.classList.toggle('shrink-delete', !!brandZone);
 		});
 		if (cell) {
-			clearIndicator();
-			const isCollapsed = cell.closest('.swimlane.collapsed');
-			if (isCollapsed) {
-				const indicator = document.createElement('div');
-				indicator.className = 'drop-indicator';
-				indicator.style.cssText = 'margin:0 auto;width:60%;position:absolute;bottom:4px;left:20%;right:20%;';
-				cell.appendChild(indicator);
-				_activeIndicator = indicator;
+			if (cell.closest('.swimlane.collapsed')) {
+				showCollapsedDropIndicator(cell);
 			} else {
 				const container = cell.classList.contains('inbox-list') ? cell : cell.querySelector('.col-cards');
-				if (container) {
-					const existingCards = container.querySelectorAll('.card:not(.dragging)');
-					if (existingCards.length > 0) {
-						const after = getInsertionPoint(e.clientY, container);
-						const indicator = document.createElement('div');
-						indicator.className = 'drop-indicator';
-						container.insertBefore(indicator, after);
-						_activeIndicator = indicator;
-					}
-				}
+				if (container) showDropIndicator(container, getInsertionPoint(e.clientY, container));
+				else clearIndicator();
 			}
+		} else {
+			clearIndicator();
 		}
 		startAutoScroll(e.clientX, e.clientY);
 	}
@@ -3524,34 +3513,9 @@ function initDragAndDrop() {
 			if (cardIds.length > 1) pushUndo('move cards to inbox');
 			for (const id of cardIds) moveCard(id, 'inbox-col', null, cardIds.length > 1);
 		} else if (projZone) {
-			const stageId = projZone.dataset?.projDropStage || stages.peek()[0]?.id || 'backlog';
-			const projId = 'p' + Date.now().toString(36);
-			batch(() => {
-				projects.update(all => [...all, { id: projId, name: 'New swimlane', color: SWATCH_COLORS[all.length % SWATCH_COLORS.length], collapsed: false }]);
-				const stgs = stages.peek();
-				cols.update(all => [...all, ...stgs.map(s => ({ id: `col-${projId}-${s.id}`, name: s.name, pId: projId, stage: s.id, wip: 0 }))]);
-			});
-			setTimeout(() => { pushUndo('move cards'); for (const id of cardIds) moveCard(id, `col-${projId}-${stageId}`, null, true); }, 50);
-			showToast('Created new swimlane');
+			dropIntoNewSwimlane(cardIds, projZone.dataset?.projDropStage);
 		} else if (stageZone) {
-			// Create new stage and move cards there
-			const stageId = 'stage-' + Date.now().toString(36);
-			const stageName = 'New stage';
-			const rowProjId = stageZone.dataset.projStageAdd;
-			pushUndo('new stage');
-			batch(() => {
-				stages.update(all => [...all, { id: stageId, name: stageName, color: '#7a5040', done: false }]);
-				const projs = projects.peek();
-				cols.update(all => [...all, ...projs.map(p => ({ id: `col-${p.id}-${stageId}`, name: stageName, pId: p.id, stage: stageId, wip: 0 }))]);
-			});
-			setTimeout(() => {
-				for (const id of cardIds) {
-					const card = cardMap.peek().get(id);
-					const projId = rowProjId || (card?.projectId && card.projectId !== 'inbox' ? card.projectId : projects.peek()[0]?.id);
-					if (projId) moveCard(id, `col-${projId}-${stageId}`, null, true);
-				}
-			}, 50);
-			showToast('Created new stage');
+			dropIntoNewStage(cardIds, stageZone.dataset?.projStageAdd);
 		}
 		clearSelection();
 		clearHover();
@@ -3569,7 +3533,7 @@ function startMultiDrag(card, cardId, rect, offsetX, offsetY, startEvent) {
 	}
 	card.classList.add('dragging');
 	selectedCards.forEach(id => {
-		const el = document.querySelector(`.card[data-card-id="${id}"]`);
+		const el = cardEl(id);
 		if (el && el !== card) el.classList.add('dragging');
 	});
 
@@ -3608,7 +3572,6 @@ function startMultiDrag(card, cardId, rect, offsetX, offsetY, startEvent) {
 		const brandZone = el?.closest('.brand');
 		const overInboxBar = el?.closest('.inbox-toggle, .bottom-bar');
 		clearHover();
-		clearIndicator();
 
 		const overInbox = inbox || el?.closest('.inbox-panel');
 		if (overInboxBar || overInbox) {
@@ -3622,19 +3585,17 @@ function startMultiDrag(card, cardId, rect, offsetX, offsetY, startEvent) {
 		const target = cell || inbox || projZone || stageZone || brandZone;
 		if (target) {
 			setHover(target);
-			if (cell || inbox) {
+			if (cell?.closest('.swimlane.collapsed')) {
+				showCollapsedDropIndicator(cell);
+			} else if (cell || inbox) {
 				const container = cell ? cell.querySelector('.col-cards') : inbox;
-				if (container) {
-					const existingCards = container.querySelectorAll('.card:not(.dragging)');
-					if (existingCards.length > 0) {
-						const indicator = document.createElement('div');
-						indicator.className = 'drop-indicator';
-						const after = getInsertionPoint(ev.clientY, container);
-						container.insertBefore(indicator, after);
-						_activeIndicator = indicator;
-					}
-				}
+				if (container) showDropIndicator(container, getInsertionPoint(ev.clientY, container));
+				else clearIndicator();
+			} else {
+				clearIndicator();
 			}
+		} else {
+			clearIndicator();
 		}
 		if (ghost) {
 			if (brandZone && !ghostShrunk) {
@@ -3664,7 +3625,7 @@ function startMultiDrag(card, cardId, rect, offsetX, offsetY, startEvent) {
 		ghost.remove();
 		card.classList.remove('dragging');
 		selectedCards.forEach(id => {
-			const el = document.querySelector(`.card[data-card-id="${id}"]`);
+			const el = cardEl(id);
 			if (el) el.classList.remove('dragging');
 		});
 		delete document.body.dataset.dragging;
@@ -3692,34 +3653,11 @@ function startMultiDrag(card, cardId, rect, offsetX, offsetY, startEvent) {
 		} else if (inbox) {
 			const after = getInsertionPoint(ev.clientY, inbox);
 			pushUndo('move cards to inbox');
-			for (const id of dragIds) moveCardInbox(id, after, true);
+			for (const id of dragIds) moveCard(id, 'inbox-col', after, true);
 		} else if (projZone) {
-			const stageId = projZone.dataset?.projDropStage || stages.peek()[0]?.id || 'backlog';
-			const projId = 'p' + Date.now().toString(36);
-			batch(() => {
-				projects.update(all => [...all, { id: projId, name: 'New swimlane', color: SWATCH_COLORS[all.length % SWATCH_COLORS.length], collapsed: false }]);
-				const stgs = stages.peek();
-				cols.update(all => [...all, ...stgs.map(s => ({ id: `col-${projId}-${s.id}`, name: s.name, pId: projId, stage: s.id, wip: 0 }))]);
-			});
-			setTimeout(() => { pushUndo('move cards'); for (const id of dragIds) moveCard(id, `col-${projId}-${stageId}`, null, true); }, 50);
-			showToast('Created new swimlane');
+			dropIntoNewSwimlane(dragIds, projZone.dataset?.projDropStage);
 		} else if (stageZone) {
-			const stageId = 'stage-' + Date.now().toString(36);
-			const rowProjId = stageZone.dataset?.projStageAdd;
-			pushUndo('new stage');
-			batch(() => {
-				stages.update(all => [...all, { id: stageId, name: 'New stage', color: '#7a5040', done: false }]);
-				const projs = projects.peek();
-				cols.update(all => [...all, ...projs.map(p => ({ id: `col-${p.id}-${stageId}`, name: 'New stage', pId: p.id, stage: stageId, wip: 0 }))]);
-			});
-			setTimeout(() => {
-				for (const id of dragIds) {
-					const c = cardMap.peek().get(id);
-					const pId = rowProjId || (c?.projectId && c.projectId !== 'inbox' ? c.projectId : projects.peek()[0]?.id);
-					if (pId) moveCard(id, `col-${pId}-${stageId}`, null, true);
-				}
-			}, 50);
-			showToast('Created new stage');
+			dropIntoNewStage(dragIds, stageZone.dataset?.projStageAdd);
 		}
 	};
 
@@ -3843,7 +3781,6 @@ function onPointerDown(e) {
 		const brandZone = el?.closest('.brand');
 		const overInboxBar = el?.closest('.inbox-toggle, .bottom-bar');
 		clearHover();
-		clearIndicator();
 
 		// Auto-open inbox on hover, auto-close when leaving
 		const overInbox = inbox || el?.closest('.inbox-panel');
@@ -3858,30 +3795,17 @@ function onPointerDown(e) {
 		const target = cell || inbox || projZone || stageZone || brandZone;
 		if (target) {
 			setHover(target);
-			if (cell || inbox) {
-				const isCollapsed = cell?.closest('.swimlane.collapsed');
-				if (isCollapsed && cell) {
-					clearIndicator();
-					const indicator = document.createElement('div');
-					indicator.className = 'drop-indicator';
-					indicator.style.cssText = 'margin:0 auto;width:60%;position:absolute;bottom:4px;left:20%;right:20%;';
-					cell.appendChild(indicator);
-					_activeIndicator = indicator;
-				} else {
-					const container = cell ? cell.querySelector('.col-cards') : inbox;
-					if (container) {
-						clearIndicator();
-						const existingCards = container.querySelectorAll('.card:not(.dragging)');
-						if (existingCards.length > 0) {
-							const after = getInsertionPoint(ev.clientY, container);
-							const indicator = document.createElement('div');
-							indicator.className = 'drop-indicator';
-							container.insertBefore(indicator, after);
-							_activeIndicator = indicator;
-						}
-					}
-				}
+			if (cell?.closest('.swimlane.collapsed')) {
+				showCollapsedDropIndicator(cell);
+			} else if (cell || inbox) {
+				const container = cell ? cell.querySelector('.col-cards') : inbox;
+				if (container) showDropIndicator(container, getInsertionPoint(ev.clientY, container));
+				else clearIndicator();
+			} else {
+				clearIndicator();
 			}
+		} else {
+			clearIndicator();
 		}
 		// Ghost shrink over delete zone
 		if (ghost) {
@@ -3948,32 +3872,11 @@ function onPointerDown(e) {
 		} else if (inbox) {
 			const after = getInsertionPoint(ev.clientY, inbox);
 			if (dragIds.length > 1) pushUndo('move cards to inbox');
-			for (const id of dragIds) moveCardInbox(id, after, dragIds.length > 1);
+			for (const id of dragIds) moveCard(id, 'inbox-col', after, dragIds.length > 1);
 		} else if (projZone) {
-			const stageId = projZone.dataset?.projDropStage || stages.peek()[0]?.id || 'backlog';
-			const projId = 'p' + Date.now().toString(36);
-			batch(() => {
-				projects.update(all => [...all, { id: projId, name: 'New swimlane', color: SWATCH_COLORS[all.length % SWATCH_COLORS.length], collapsed: false }]);
-				const stgs = stages.peek();
-				cols.update(all => [...all, ...stgs.map(s => ({ id: `col-${projId}-${s.id}`, name: s.name, pId: projId, stage: s.id, wip: 0 }))]);
-			});
-			setTimeout(() => { pushUndo('move cards'); for (const id of dragIds) moveCard(id, `col-${projId}-${stageId}`, null, true); }, 50);
+			dropIntoNewSwimlane(dragIds, projZone.dataset?.projDropStage);
 		} else if (stageZone) {
-			const stageId = 'stage-' + Date.now().toString(36);
-			const rowProjId = stageZone.dataset?.projStageAdd;
-			pushUndo('new stage');
-			batch(() => {
-				stages.update(all => [...all, { id: stageId, name: 'New stage', color: '#7a5040', done: false }]);
-				const projs = projects.peek();
-				cols.update(all => [...all, ...projs.map(p => ({ id: `col-${p.id}-${stageId}`, name: 'New stage', pId: p.id, stage: stageId, wip: 0 }))]);
-			});
-			setTimeout(() => {
-				for (const id of dragIds) {
-					const c = cardMap.peek().get(id);
-					const projId = rowProjId || (c?.projectId && c.projectId !== 'inbox' ? c.projectId : projects.peek()[0]?.id);
-					if (projId) moveCard(id, `col-${projId}-${stageId}`, null, true);
-				}
-			}, 50);
+			dropIntoNewStage(dragIds, stageZone.dataset?.projStageAdd);
 		}
 		clearSelection();
 	};
@@ -3983,69 +3886,34 @@ function onPointerDown(e) {
 	document.addEventListener('pointercancel', onUp);
 }
 
-function moveCardInbox(cardId, beforeEl, skipUndo) {
-	if (!skipUndo) pushUndo('move card to inbox');
-	_movedCards.add(cardId);
-	batch(() => {
-		const allCards = cards.peek();
-		const idx = allCards.findIndex(c => c.id === cardId);
-		if (idx === -1) return;
-		const card = { ...allCards[idx] };
-		card.columnId = 'inbox-col';
-		card.projectId = 'inbox';
-		card._v = Date.now();
-
-		const colCards = allCards.filter(c => c.columnId === 'inbox-col' && c.id !== cardId);
-		if (beforeEl) {
-			const beforeId = beforeEl.dataset?.cardId;
-			const beforeIdx = colCards.findIndex(c => c.id === beforeId);
-			if (beforeIdx >= 0) {
-				card.order = beforeIdx;
-				colCards.splice(beforeIdx, 0, card);
-			} else {
-				card.order = colCards.length;
-				colCards.push(card);
-			}
-		} else {
-			card.order = colCards.length;
-			colCards.push(card);
-		}
-		colCards.forEach((c, i) => { c.order = i; });
-		const next = allCards.map(c => {
-			if (c.id === cardId) return card;
-			const updated = colCards.find(cc => cc.id === c.id);
-			return updated ? { ...c, order: updated.order } : c;
-		});
-		cards.set(next);
-	});
-}
-
-let _rectCache = new WeakMap();
-let _rectCacheFrame = -1;
-
-function getCachedRect(el) {
-	const frame = _rectCacheFrame;
-	if (frame !== _currentFrame) {
-		_rectCache = new WeakMap();
-		_rectCacheFrame = _currentFrame;
-	}
-	let r = _rectCache.get(el);
-	if (!r) {
-		r = el.getBoundingClientRect();
-		_rectCache.set(el, r);
-	}
-	return r;
-}
-
-let _currentFrame = 0;
-(function tickFrame() { _currentFrame++; requestAnimationFrame(tickFrame); })();
-
 function getInsertionPoint(y, container) {
-	const cards = [...container.querySelectorAll('.card:not(.dragging)')];
-	return cards.find(c => {
-		const box = getCachedRect(c);
-		return y < box.top + box.height / 2;
-	}) ?? null;
+	for (const c of container.querySelectorAll('.card:not(.dragging)')) {
+		const box = c.getBoundingClientRect();
+		if (y < box.top + box.height / 2) return c;
+	}
+	return null;
+}
+
+// Show the drop line before `after` (null = end); reuses the existing line when it's
+// already in place so dragover doesn't churn the DOM and force a relayout every frame.
+function showDropIndicator(container, after) {
+	if (_activeIndicator && _activeIndicator.parentNode === container && _activeIndicator.nextElementSibling === after) return;
+	clearIndicator();
+	if (!container.querySelector('.card:not(.dragging)')) return;
+	const indicator = document.createElement('div');
+	indicator.className = 'drop-indicator';
+	container.insertBefore(indicator, after);
+	_activeIndicator = indicator;
+}
+
+function showCollapsedDropIndicator(cell) {
+	if (_activeIndicator && _activeIndicator.parentNode === cell) return;
+	clearIndicator();
+	const indicator = document.createElement('div');
+	indicator.className = 'drop-indicator';
+	indicator.style.cssText = 'margin:0 auto;width:60%;position:absolute;bottom:4px;left:20%;right:20%;';
+	cell.appendChild(indicator);
+	_activeIndicator = indicator;
 }
 
 function toggleCardDone(cardId) {
@@ -4071,62 +3939,32 @@ function toggleCardDone(cardId) {
 
 function moveCard(cardId, newColId, beforeEl, skipUndo) {
 	const currentCard = cardMap.peek().get(cardId);
-	if (currentCard && currentCard.columnId === newColId && !beforeEl) {
-		const colCards = cards.peek().filter(c => c.columnId === newColId);
+	if (!currentCard) return;
+	if (currentCard.columnId === newColId && !beforeEl) {
+		const colCards = cardsByColumn.peek().get(newColId) ?? [];
 		if (colCards.length <= 1) return;
 	}
 	if (!skipUndo) pushUndo('move card');
-	if (!currentCard || currentCard.columnId !== newColId) _movedCards.add(cardId);
-	batch(() => {
-		const allCards = cards.peek();
-		const idx = allCards.findIndex(c => c.id === cardId);
-		if (idx === -1) return;
+	if (currentCard.columnId !== newColId) _movedCards.add(cardId);
 
-		const card = { ...allCards[idx] };
-		let newProjectId;
-		if (newColId === 'inbox-col') {
-			newProjectId = 'inbox';
-		} else {
-			const parts = newColId.split('-');
-			newProjectId = parts.length >= 3 ? parts.slice(1, -1).join('-') : card.projectId;
-			const newStage = parts[parts.length - 1];
-			const stg = stages.peek().find(s => s.id === newStage);
-			// Only force done=true when moving to a done-column; otherwise keep existing state
-			if (stg?.done) card.done = true;
-		}
+	const card = { ...currentCard, columnId: newColId, _v: Date.now() };
+	const { projectId, stageId } = parseColId(newColId);
+	card.projectId = projectId;
+	// Only force done=true when moving to a done-column; otherwise keep existing state
+	if (stageId && stages.peek().find(s => s.id === stageId)?.done) card.done = true;
 
-		card.columnId = newColId;
-		card.projectId = newProjectId === 'inbox' ? 'inbox' : newProjectId;
-		card._v = Date.now();
+	// Recalculate order within the target column
+	const colCards = (cardsByColumn.peek().get(newColId) ?? []).filter(c => c.id !== cardId);
+	const beforeIdx = beforeEl ? colCards.findIndex(c => c.id === beforeEl.dataset?.cardId) : -1;
+	if (beforeIdx >= 0) colCards.splice(beforeIdx, 0, card);
+	else colCards.push(card);
+	const orderMap = new Map(colCards.map((c, i) => [c.id, i]));
 
-		// Recalculate order
-		const colCards = allCards.filter(c => c.columnId === newColId && c.id !== cardId);
-		if (beforeEl) {
-			const beforeId = beforeEl.dataset?.cardId;
-			const beforeIdx = colCards.findIndex(c => c.id === beforeId);
-			if (beforeIdx >= 0) {
-				card.order = beforeIdx;
-				colCards.splice(beforeIdx, 0, card);
-			} else {
-				card.order = colCards.length;
-				colCards.push(card);
-			}
-		} else {
-			card.order = colCards.length;
-			colCards.push(card);
-		}
-
-		// Renumber
-		colCards.forEach((c, i) => { c.order = i; });
-
-		const next = allCards.map(c => {
-			if (c.id === cardId) return card;
-			const updated = colCards.find(cc => cc.id === c.id);
-			return updated ? { ...c, order: updated.order } : c;
-		});
-
-		cards.set(next);
-		});
+	cards.set(cards.peek().map(c => {
+		if (c.id === cardId) return { ...card, order: orderMap.get(cardId) };
+		const order = orderMap.get(c.id);
+		return order != null && order !== c.order ? { ...c, order } : c;
+	}));
 	if (navigator.vibrate) navigator.vibrate(50);
 }
 
@@ -4224,7 +4062,7 @@ function clearCountHighlights() {
 
 function highlightCollapsedCount(entry) {
 	clearCountHighlights();
-	const cell = document.querySelector(`.col-cell[data-col-id="${entry.colId}"]`);
+	const cell = document.querySelector(`.col-cell[data-col-id="${CSS.escape(entry.colId)}"]`);
 	if (!cell) return;
 	const count = cell.querySelector('.sw-col-count');
 	if (!count) return;
@@ -4317,7 +4155,7 @@ function cycleFilteredCard(direction) {
 	}
 
 	requestAnimationFrame(() => {
-		const el = document.querySelector(`.card[data-card-id="${entry.cardId}"]`);
+		const el = cardEl(entry.cardId);
 		if (el) {
 			el.focus();
 			el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
@@ -4342,7 +4180,7 @@ document.addEventListener('click', (e) => {
 	));
 	requestAnimationFrame(() => {
 		requestAnimationFrame(() => {
-			const el = document.querySelector(`.card[data-card-id="${firstCardId}"]`);
+			const el = cardEl(firstCardId);
 			if (el) {
 				el.focus();
 				el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
@@ -4403,6 +4241,7 @@ function initKeyboard() {
 				});
 				if (hasVisible) {
 					pushUndo('expand swimlane');
+					_lastNavFilter = null; // re-run filter navigation so focus lands on the revealed match
 					projects.update(all => all.map(pr => pr.id === p.id ? { ...pr, collapsed: false } : pr));
 					return;
 				}
@@ -4446,24 +4285,14 @@ function initKeyboard() {
 						try {
 							const data = JSON.parse(text);
 							if (data.stages && data.cards) {
-								pushUndo('paste JSON');
-								batch(() => {
-									stages.set(data.stages);
-									if (data.projects) projects.set(data.projects);
-									cards.set(data.cards);
-								});
+								applyBoard(data, 'paste JSON');
 								showToast(`Pasted ${data.cards.length} cards`);
 								return;
 							}
 						} catch (_) {}
 						const parsed = parseBoardMd(text);
 						if (parsed.cards.length) {
-							pushUndo('paste markdown');
-							batch(() => {
-								if (parsed.stages.length) stages.set(parsed.stages);
-								if (parsed.projects.length) projects.set(parsed.projects);
-								cards.set(parsed.cards);
-							});
+							applyBoard(parsed, 'paste markdown');
 							showToast(`Pasted ${parsed.cards.length} cards`);
 						}
 					}
@@ -4478,7 +4307,7 @@ function initKeyboard() {
 			}
 			if (e.key === 'e') {
 				const focused = document.activeElement?.closest('.card[data-card-id]');
-				if (focused) { inlineEditCard(focused); return; }
+				if (focused) { e.preventDefault(); inlineEditCard(focused); return; }
 			}
 			if (e.key === 'Enter') {
 				const focused = document.activeElement?.closest('.card[data-card-id]');
@@ -4637,7 +4466,7 @@ function moveCardByKey(cardEl, key) {
 		});
 		// Re-focus after re-render
 		requestAnimationFrame(() => {
-			document.querySelector(`.card[data-card-id="${cardId}"]`)?.focus();
+			cardEl(cardId)?.focus();
 		});
 		announce(`Moved ${key === 'ArrowUp' ? 'up' : 'down'}`);
 	} else if (key === 'ArrowLeft' || key === 'ArrowRight') {
@@ -4654,7 +4483,7 @@ function moveCardByKey(cardEl, key) {
 		pushUndo('move card');
 		moveCard(cardId, nextColId, null);
 		requestAnimationFrame(() => {
-			document.querySelector(`.card[data-card-id="${cardId}"]`)?.focus();
+			cardEl(cardId)?.focus();
 		});
 		announce(`Moved to ${nextCell.getAttribute('aria-label') || 'column'}`);
 	}
@@ -4670,12 +4499,11 @@ let _openCardSnapshot = null;
 let _openCardUndoPushed = false;
 
 function openCardPanel(cardId) {
-	const card = cardMap.peek().get(cardId) || cards.peek().find(c => c.id === cardId);
+	const card = cardMap.peek().get(cardId);
 	if (!card) return;
 	document.activeElement?.blur();
 	_openCardId = cardId;
 	_openCardSnapshot = structuredClone(card);
-	focusedCardId.set(cardId);
 
 	const backdrop = document.getElementById('cpanel-backdrop');
 	document.getElementById('cpanel-title').value = card.title;
@@ -4701,15 +4529,15 @@ function openCardPanel(cardId) {
 	// Project dropdown
 	const projSelect = document.getElementById('cpanel-project');
 	projSelect.innerHTML = '<option value="inbox">Inbox</option>' +
-		projects.peek().map(p => `<option value="${p.id}">${escHtml(p.name)}</option>`).join('');
+		projects.peek().map(p => `<option value="${escHtml(p.id)}">${escHtml(p.name)}</option>`).join('');
 	projSelect.value = card.projectId || 'inbox';
 
 	// Stage dropdown
 	const stageSelect = document.getElementById('cpanel-stage');
-	const currentStageId = card.columnId === 'inbox-col' ? '' : card.columnId.split('-').pop();
+	const currentStageId = parseColId(card.columnId).stageId || '';
 	function populateStages() {
 		stageSelect.innerHTML = stages.peek().map(s =>
-			`<option value="${s.id}">${escHtml(s.name)}${s.done ? ' ✓' : ''}</option>`
+			`<option value="${escHtml(s.id)}">${escHtml(s.name)}${s.done ? ' ✓' : ''}</option>`
 		).join('');
 		stageSelect.value = currentStageId || stages.peek()[0]?.id || '';
 		stageSelect.disabled = projSelect.value === 'inbox';
@@ -4735,7 +4563,7 @@ function renderChips(containerId, items, prefix, inputId) {
 	for (const item of items) {
 		const chip = document.createElement('span');
 		chip.className = 'chip';
-		chip.innerHTML = `${prefix}${escHtml(item)} <button class="chip-remove" data-remove="${item}">&times;</button>`;
+		chip.innerHTML = `${prefix}${escHtml(item)} <button class="chip-remove">&times;</button>`;
 		container.insertBefore(chip, input);
 	}
 }
@@ -4767,7 +4595,6 @@ function closeCardPanel(autoSave = true) {
 	_openCardId = null;
 	_openCardSnapshot = null;
 	_openCardUndoPushed = false;
-	focusedCardId.set(null);
 }
 
 function saveCardPanel() {
@@ -4788,39 +4615,36 @@ function saveCardPanel() {
 	const newProjId = document.getElementById('cpanel-project').value;
 	const newStageId = document.getElementById('cpanel-stage').value;
 
-	batch(() => {
-		cards.update(all => all.map(c => {
-			if (c.id !== _openCardId) return c;
-			const projectId = newProjId;
-			const columnId = newProjId === 'inbox' ? 'inbox-col' : `col-${newProjId}-${newStageId}`;
-			return {
-				...c, title, type, notes, startDate, dueDate, assignees, labels,
-				columnId, projectId,
-				_v: Date.now(),
-			};
-		}));
-	});
+	const columnId = newProjId === 'inbox' ? 'inbox-col' : `col-${newProjId}-${newStageId}`;
+	cards.update(all => all.map(c => {
+		if (c.id !== _openCardId) return c;
+		const next = { ...c, title, type, notes, startDate, dueDate, assignees, labels, columnId, projectId: newProjId, _v: Date.now() };
+		if (columnId !== c.columnId) {
+			// Moved via the dropdowns: append to the target column, like a drop would
+			next.order = cardsByColumn.peek().get(columnId)?.length ?? 0;
+			if (stages.peek().find(s => s.id === newStageId)?.done && newProjId !== 'inbox') next.done = true;
+		}
+		return next;
+	}));
 	showToast('Saved');
 }
 
 function deleteCard(cardId) {
 	pushUndo('delete card');
 	const idToDelete = cardId || _openCardId;
-	batch(() => {
-		cards.update(all => all.filter(c => c.id !== idToDelete));
-	});
+	cards.update(all => all.filter(c => c.id !== idToDelete));
+	_openCardSnapshot = null; // nothing to revert — don't toast "Changes reverted"
 	closeCardPanel(false);
 	if (navigator.vibrate) navigator.vibrate(50);
 	showToast('Card deleted');
 }
 
-function addCardToCol(colId) {
-	pushUndo('new card');
+function addCardToCol(colId, skipUndo) {
+	if (!skipUndo) pushUndo('new card');
 	const id = 'c' + Date.now().toString(36);
-	const parts = colId.split('-');
-	const projectId = parts.length >= 3 ? parts.slice(1, -1).join('-') : 'inbox';
-	const existing = cards.peek().filter(c => c.columnId === colId);
-	const stg = stages.peek().find(s => colId.endsWith(s.id));
+	const { projectId, stageId } = parseColId(colId);
+	const existing = cardsByColumn.peek().get(colId) ?? [];
+	const stg = stages.peek().find(s => s.id === stageId);
 
 	const card = {
 		id, title: '', columnId: colId, projectId,
@@ -4838,63 +4662,67 @@ function addCardToCol(colId) {
 
 let _cellEditColId = null;
 
+// One card as an Obsidian-style list item, with notes as indented continuation lines.
+function cardToMd(c) {
+	let line = `- [${c.done ? 'x' : ' '}] ${c.title}`;
+	for (const a of c.assignees) line += ` @${a}`;
+	for (const l of c.labels) line += ` #${l}`;
+	if (c.type === 'meeting') line += ' $meeting';
+	if (c.type === 'followup') line += ' $followup';
+	if (c.startDate) line += ` start:${c.startDate}`;
+	if (c.dueDate) line += ` due:${c.dueDate}`;
+	line += ` ^${c.id}\n`;
+	if (c.notes) for (const nl of c.notes.split('\n')) line += `  ${nl}\n`;
+	return line;
+}
+
+// Parse a markdown list item ("- [x] Title @who #tag due:… ^id" or a bare "- Title").
+// Returns null for non-list lines.
+function parseCardLine(line) {
+	const taskMatch = line.match(/^-\s+\[([ xX])\]\s+(.+)/);
+	const bareMatch = !taskMatch && line.match(/^-\s+(.+)/);
+	if (!taskMatch && !bareMatch) return null;
+	const done = taskMatch ? taskMatch[1] !== ' ' : false;
+	let rest = taskMatch ? taskMatch[2] : bareMatch[1];
+	const assignees = [], labels = [];
+	let dueDate = null, startDate = null, blockId = null, type = 'task';
+
+	const idMatch = rest.match(/\s*\^(\S+)\s*$/);
+	if (idMatch) { blockId = idMatch[1]; rest = rest.replace(idMatch[0], ''); }
+	const dueMatch = rest.match(/(?:📅\s*|due:)(\d{4}-\d{2}-\d{2})/);
+	if (dueMatch) { dueDate = dueMatch[1]; rest = rest.replace(dueMatch[0], ''); }
+	const startMatch = rest.match(/(?:⏳\s*|start:)(\d{4}-\d{2}-\d{2})/);
+	if (startMatch) { startDate = startMatch[1]; rest = rest.replace(startMatch[0], ''); }
+	if (/\$meeting/.test(rest)) { type = 'meeting'; rest = rest.replace(/\$meeting/g, ''); }
+	if (/\$followup/.test(rest)) { type = 'followup'; rest = rest.replace(/\$followup/g, ''); }
+	rest = rest.replace(/@(\w+)/g, (_, name) => { assignees.push(name); return ''; });
+	rest = rest.replace(/#(\w+)/g, (_, label) => { labels.push(label); return ''; });
+
+	return { blockId, title: rest.trim(), done, type, assignees, labels, startDate, dueDate };
+}
+
+function newCardId() {
+	return 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+}
+
 function serializeCellMd(colId) {
-	const cc = cardsByColumn.peek().get(colId) ?? [];
-	let md = '';
-	for (const c of cc) {
-		const check = c.done ? 'x' : ' ';
-		let line = `- [${check}] ${c.title}`;
-		for (const a of c.assignees) line += ` @${a}`;
-		for (const l of c.labels) line += ` #${l}`;
-		if (c.type === 'meeting') line += ' $meeting';
-		if (c.type === 'followup') line += ' $followup';
-		if (c.startDate) line += ` start:${c.startDate}`;
-		if (c.dueDate) line += ` due:${c.dueDate}`;
-		line += ` ^${c.id}`;
-		md += line + '\n';
-		if (c.notes) {
-			for (const nl of c.notes.split('\n')) {
-				md += `  ${nl}\n`;
-			}
-		}
-	}
-	return md;
+	return (cardsByColumn.peek().get(colId) ?? []).map(cardToMd).join('');
 }
 
 function parseCellCards(text, colId) {
-	const lines = text.split('\n');
-	const parts = colId.split('-');
-	const projectId = parts.length >= 3 ? parts.slice(1, -1).join('-') : 'inbox';
+	const { projectId } = parseColId(colId);
 	const result = [];
 	let lastCard = null;
 	let order = 0;
 
-	for (const line of lines) {
-		const taskMatch = line.match(/^-\s+\[([ xX])\]\s+(.+)/);
-		const bareMatch = !taskMatch && line.match(/^-\s+(.+)/);
-
-		if (taskMatch || bareMatch) {
-			const done = taskMatch ? taskMatch[1] !== ' ' : false;
-			let rest = taskMatch ? taskMatch[2] : bareMatch[1];
-			const assignees = [], labels = [];
-			let dueDate = null, startDate = null, blockId = null, type = 'task';
-
-			const idMatch = rest.match(/\s*\^(\S+)\s*$/);
-			if (idMatch) { blockId = idMatch[1]; rest = rest.replace(idMatch[0], ''); }
-			const dueMatch = rest.match(/(?:📅\s*|due:)(\d{4}-\d{2}-\d{2})/);
-			if (dueMatch) { dueDate = dueMatch[1]; rest = rest.replace(dueMatch[0], ''); }
-			const startMatch = rest.match(/(?:⏳\s*|start:)(\d{4}-\d{2}-\d{2})/);
-			if (startMatch) { startDate = startMatch[1]; rest = rest.replace(startMatch[0], ''); }
-			if (/\$meeting/.test(rest)) { type = 'meeting'; rest = rest.replace(/\$meeting/g, ''); }
-			if (/\$followup/.test(rest)) { type = 'followup'; rest = rest.replace(/\$followup/g, ''); }
-			rest = rest.replace(/@(\w+)/g, (_, name) => { assignees.push(name); return ''; });
-			rest = rest.replace(/#(\w+)/g, (_, label) => { labels.push(label); return ''; });
-
+	for (const line of text.split('\n')) {
+		const p = parseCardLine(line);
+		if (p) {
+			const { blockId, ...fields } = p;
 			lastCard = {
-				id: blockId || ('c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5)),
-				title: rest.trim(), columnId: colId, projectId,
-				order: order++, done, type, assignees, labels,
-				notes: '', startDate, dueDate,
+				id: blockId || newCardId(),
+				...fields, columnId: colId, projectId,
+				order: order++, notes: '',
 				_v: Date.now(), _created: Date.now(),
 				_existingId: blockId,
 			};
@@ -4969,14 +4797,9 @@ function saveCellEditor() {
 		cards.update(all => {
 			const kept = all.filter(c => !oldIds.has(c.id));
 			// Add parsed cards, preserving existing data where blockId matches
-			for (const nc of newCards) {
-				const existing = nc._existingId ? oldMap.get(nc._existingId) : null;
-				if (existing) {
-					kept.push({ ...existing, ...nc, id: existing.id, _created: existing._created, _v: Date.now() });
-				} else {
-					delete nc._existingId;
-					kept.push(nc);
-				}
+			for (const { _existingId, ...nc } of newCards) {
+				const existing = _existingId ? oldMap.get(_existingId) : null;
+				kept.push(existing ? { ...existing, ...nc, id: existing.id, _created: existing._created } : nc);
 			}
 			return kept;
 		});
@@ -5001,7 +4824,6 @@ function inlineEditCard(cardEl) {
 	const titleEl = cardEl.querySelector('.card__title');
 	if (!titleEl) return;
 
-	cardEl.dataset.interacting = 'true';
 	const input = document.createElement('input');
 	input.type = 'text';
 	input.value = card.title;
@@ -5011,20 +4833,22 @@ function inlineEditCard(cardEl) {
 	input.focus();
 	input.select();
 
+	let cancelled = false;
 	const finish = () => {
 		const newTitle = input.value.trim() || card.title;
-		batch(() => {
-			cards.update(all => all.map(c => {
-				if (c.id !== cardId) return c;
-				return { ...c, title: newTitle, _v: Date.now() };
-			}));
-		});
-		delete cardEl.dataset.interacting;
+		if (cancelled || newTitle === card.title) { input.replaceWith(titleEl); return; }
+		pushUndo('rename card');
+		cards.update(all => all.map(c => c.id === cardId ? { ...c, title: newTitle, _v: Date.now() } : c));
 	};
 
 	input.addEventListener('blur', finish, { once: true });
 	input.addEventListener('keydown', (e) => {
-		if (e.key === 'Enter' || e.key === 'Escape') { e.preventDefault(); input.blur(); }
+		if (e.key === 'Enter' || e.key === 'Escape') {
+			e.preventDefault();
+			e.stopPropagation(); // keep Escape from also clearing the filter / closing panels
+			cancelled = e.key === 'Escape';
+			input.blur();
+		}
 	});
 }
 
@@ -5110,40 +4934,55 @@ class PersistenceLayer {
 	_createWorker() {
 		const code = `
 			let opfsRoot = null, db = null;
-			self.onmessage = async ({ data }) => {
+			// Every message runs on one promise chain: a save can't start before init has
+			// finished, and two saves never write the file concurrently (last one wins).
+			let queue = Promise.resolve();
+			self.onmessage = ({ data }) => { queue = queue.then(() => handle(data)).catch(() => {}); };
+			async function handle(data) {
 				if (data.type === 'init') {
-					try { opfsRoot = await self.navigator.storage.getDirectory(); } catch (_) {}
-					if (!opfsRoot) {
-						try {
+					if (data.opfs) {
+						try { opfsRoot = await self.navigator.storage.getDirectory(); } catch (_) {}
+					} else {
+						db = await new Promise((resolve) => {
 							const req = indexedDB.open('detrita', 1);
 							req.onupgradeneeded = (e) => {
 								const d = e.target.result;
 								if (!d.objectStoreNames.contains('state')) d.createObjectStore('state');
 							};
-							req.onsuccess = () => { db = req.result; };
-						} catch (_) {}
+							req.onsuccess = () => resolve(req.result);
+							req.onerror = () => resolve(null);
+						});
 					}
 					return;
 				}
 				if (data.type === 'save') {
-					try {
-						if (opfsRoot) {
-							const h = await opfsRoot.getFileHandle('board.json', { create: true });
+					if (opfsRoot) {
+						const h = await opfsRoot.getFileHandle('board.json', { create: true });
+						if (h.createSyncAccessHandle) {
+							// Worker-only API; the one Safari < 26 has (it lacks createWritable)
+							const ah = await h.createSyncAccessHandle();
+							try {
+								const bytes = new TextEncoder().encode(data.payload);
+								ah.truncate(0);
+								ah.write(bytes, { at: 0 });
+								ah.flush();
+							} finally { ah.close(); }
+						} else {
 							const w = await h.createWritable();
 							await w.write(data.payload);
 							await w.close();
-						} else if (db) {
-							const tx = db.transaction('state', 'readwrite');
-							tx.objectStore('state').put(data.payload, 'board');
 						}
-					} catch (_) {}
+					} else if (db) {
+						db.transaction('state', 'readwrite').objectStore('state').put(data.payload, 'board');
+					}
 				}
-			};
+			}
 		`;
 		const blob = new Blob([code], { type: 'application/javascript' });
 		const url = URL.createObjectURL(blob);
 		const w = new Worker(url);
-		w.postMessage({ type: 'init' });
+		// Use the same backend as the main thread, so load() reads what the worker wrote.
+		w.postMessage({ type: 'init', opfs: !!this._opfsRoot });
 		return w;
 	}
 
@@ -5215,6 +5054,8 @@ class PersistenceLayer {
 // ══════════════════════════════════════════════════════════════
 
 const persistence = new PersistenceLayer();
+let _bootReady = Promise.resolve(); // settles once the saved board (or the demo) is in place
+const LOCAL_MODIFIED_KEY = 'detrita-local-modified';
 
 function initApp() {
 
@@ -5230,16 +5071,9 @@ function initApp() {
 	} catch (_) {}
 
 	// Initialize persistence and load saved state
-	persistence.init().then(() => persistence.load()).then(saved => {
+	_bootReady = persistence.init().then(() => persistence.load()).then(saved => {
 		if (saved) {
-			batch(() => {
-				if (saved.stages) stages.set(saved.stages);
-				if (saved.projects) projects.set(saved.projects);
-				if (saved.cards) cards.set(saved.cards);
-				if (saved.stages && saved.projects) {
-					cols.set(makeCols(saved.projects, saved.stages));
-				}
-			});
+			applyBoard(saved);
 		} else {
 			// First visit — load tutorial demo and show help
 			const demo = getDemoData();
@@ -5247,7 +5081,6 @@ function initApp() {
 				stages.set(demo.stages);
 				projects.set(demo.projects);
 				cards.set(demo.cards);
-				cols.set(makeCols(demo.projects, demo.stages));
 			});
 			setTimeout(() => toggleHelp(), 300);
 		}
@@ -5256,21 +5089,29 @@ function initApp() {
 	// Render
 	let _boardRenderPending = false;
 	let _inboxRenderPending = false;
+	// Subscribe to the raw signals, not the computed indexes: reading a computed here would
+	// rebuild it synchronously on every mutation. The frame callback builds it once instead.
 	effect(() => {
-		stages.get(); projects.get(); cardsByColumn.get(); visibleIds.get();
+		stages.get(); projects.get(); cards.get(); filterStr.get();
 		if (!_boardRenderPending) {
 			_boardRenderPending = true;
 			requestAnimationFrame(() => { _boardRenderPending = false; updateColumnWidth(); renderBoard(); });
 		}
 	});
 	effect(() => {
-		cardsByColumn.get(); visibleIds.get();
+		cards.get(); filterStr.get();
 		if (!_inboxRenderPending) {
 			_inboxRenderPending = true;
 			requestAnimationFrame(() => { _inboxRenderPending = false; renderInbox(); });
 		}
 	});
 	window.addEventListener('resize', () => { updateColumnWidth(); });
+	// Keep "today" current when the app is left open overnight (PWA / pinned tab).
+	document.addEventListener('visibilitychange', () => {
+		if (document.hidden || NOW_STR === localDateStr()) return;
+		NOW_STR = localDateStr();
+		cards.set([...cards.peek()]); // re-render due/overdue badges
+	});
 	effect(() => {
 		cards.get(); filterStr.get();
 		if ($('stats-bar')?.classList.contains('open')) renderStats();
@@ -5327,20 +5168,29 @@ function initApp() {
 	// Persistence — auto-save (debounced, skip if unchanged)
 	let saveTimer = null;
 	let lastSavedHash = '';
-	effect(() => {
-		const data = {
-			stages: stages.get(),
-			projects: projects.get(),
-			cards: cards.get(),
-		};
+	let pendingSave = null;
+	const flushSave = () => {
 		clearTimeout(saveTimer);
-		saveTimer = setTimeout(() => {
-			const json = JSON.stringify(data);
-			if (json === lastSavedHash) return;
-			lastSavedHash = json;
-			persistence.saveRaw(json);
-			fileSync.scheduleSave();
-		}, 1000);
+		const data = pendingSave;
+		pendingSave = null;
+		if (!data) return;
+		const json = JSON.stringify(data);
+		if (json === lastSavedHash) return;
+		lastSavedHash = json;
+		persistence.saveRaw(json);
+		try { localStorage.setItem(LOCAL_MODIFIED_KEY, String(Date.now())); } catch (_) {}
+		fileSync.scheduleSave();
+	};
+	effect(() => {
+		pendingSave = { stages: stages.get(), projects: projects.get(), cards: cards.get() };
+		clearTimeout(saveTimer);
+		saveTimer = setTimeout(flushSave, 1000);
+	});
+	// Don't lose the last second of edits (or a pending file sync) when the tab is hidden or closed
+	document.addEventListener('visibilitychange', () => {
+		if (!document.hidden) return;
+		flushSave();
+		if (fileSync._dirty) fileSync.saveNow();
 	});
 
 	// Keyboard
@@ -5351,6 +5201,24 @@ function initApp() {
 }
 
 let _boardDragType = null; // 'stage' | 'project' | null
+
+// Move item `fromId` next to `toId` (after it when `after`, else before) — matching the
+// side the drop indicator showed — and toast where it landed.
+function reorderSignal(sig, fromId, toId, after, action) {
+	const arr = [...sig.peek()];
+	const fromIdx = arr.findIndex(x => x.id === fromId);
+	if (fromIdx < 0) return;
+	const [moved] = arr.splice(fromIdx, 1);
+	const toIdx = arr.findIndex(x => x.id === toId);
+	if (toIdx < 0) return;
+	const newIdx = toIdx + (after ? 1 : 0);
+	if (newIdx === fromIdx) return; // dropped back where it was
+	pushUndo(action);
+	arr.splice(newIdx, 0, moved);
+	sig.set(arr);
+	const rel = arr[newIdx - 1] ? `after ${arr[newIdx - 1].name}` : `before ${arr[newIdx + 1]?.name || ''}`;
+	showToast(`${moved.name} → ${rel}`);
+}
 
 function wireUpBoardEvents() {
 	const board = document.getElementById('board');
@@ -5450,12 +5318,9 @@ function wireUpBoardEvents() {
 					s.id === stageId ? { ...s, done: !s.done } : s
 				));
 				// Mark/unmark all cards in this stage
-				cards.update(all => all.map(c => {
-					if (c.columnId.endsWith('-' + stageId)) {
-						return { ...c, done: !wasDone, _v: Date.now() };
-					}
-					return c;
-				}));
+				cards.update(all => all.map(c =>
+					parseColId(c.columnId).stageId === stageId ? { ...c, done: !wasDone, _v: Date.now() } : c
+				));
 			});
 			return;
 		}
@@ -5576,23 +5441,8 @@ function wireUpBoardEvents() {
 			if (target && fromId) {
 				const toId = target.dataset.stageId;
 				if (fromId !== toId) {
-					pushUndo('reorder stages');
 					const rect = target.getBoundingClientRect();
-					const onLeft = e.clientX < rect.left + rect.width / 2;
-					stages.update(all => {
-						const arr = [...all];
-						const fromIdx = arr.findIndex(s => s.id === fromId);
-						const toIdx = arr.findIndex(s => s.id === toId);
-						const [m] = arr.splice(fromIdx, 1);
-						arr.splice(toIdx, 0, m);
-						return arr;
-					});
-					const stgs = stages.peek();
-					const newIdx = stgs.findIndex(s => s.id === fromId);
-					const movedName = stgs[newIdx]?.name;
-					const neighbor = stgs[newIdx - 1] || stgs[newIdx + 1];
-					const rel = stgs[newIdx - 1] ? `after ${stgs[newIdx - 1].name}` : `before ${stgs[newIdx + 1]?.name || ''}`;
-					showToast(`${movedName} → ${rel}`);
+					reorderSignal(stages, fromId, toId, e.clientX >= rect.left + rect.width / 2, 'reorder stages');
 				}
 			}
 			clearReorderIndicator();
@@ -5606,20 +5456,8 @@ function wireUpBoardEvents() {
 			if (target && fromId) {
 				const toId = target.dataset.project;
 				if (fromId !== toId) {
-					pushUndo('reorder swimlanes');
-					projects.update(all => {
-						const arr = [...all];
-						const fromIdx = arr.findIndex(p => p.id === fromId);
-						const toIdx = arr.findIndex(p => p.id === toId);
-						const [m] = arr.splice(fromIdx, 1);
-						arr.splice(toIdx, 0, m);
-						return arr;
-					});
-					const projs = projects.peek();
-					const newIdx = projs.findIndex(p => p.id === fromId);
-					const movedName = projs[newIdx]?.name;
-					const rel = projs[newIdx - 1] ? `after ${projs[newIdx - 1].name}` : `before ${projs[newIdx + 1]?.name || ''}`;
-					showToast(`${movedName} → ${rel}`);
+					const rect = target.getBoundingClientRect();
+					reorderSignal(projects, fromId, toId, e.clientY >= rect.top + rect.height / 2, 'reorder swimlanes');
 				}
 			}
 			clearReorderIndicator();
@@ -5641,9 +5479,8 @@ function wireUpBoardEvents() {
 			// Don't toggle done in done-columns
 			const colCell = card.closest('.col-cell[data-col-id]');
 			if (colCell) {
-				const stageId = colCell.dataset.colId.split('-').pop();
-				const stg = stages.peek().find(s => s.id === stageId);
-				if (stg?.done) return;
+				const { stageId } = parseColId(colCell.dataset.colId);
+				if (stages.peek().find(s => s.id === stageId)?.done) return;
 			}
 			const cardId = card.dataset.cardId;
 			pushUndo('toggle done');
@@ -5675,14 +5512,9 @@ function wireUpBoardEvents() {
 			if (isLast && isEmpty) {
 				const swimlane = cell.closest('.swimlane[data-project]');
 				const projId = swimlane?.dataset.project;
-				const stageId = 'stage-' + Date.now().toString(36);
 				pushUndo('new stage + card');
-				batch(() => {
-					stages.update(all => [...all, { id: stageId, name: 'New stage', color: '#7a5040', done: false }]);
-					const projs = projects.peek();
-					cols.update(all => [...all, ...projs.map(p => ({ id: `col-${p.id}-${stageId}`, name: 'New stage', pId: p.id, stage: stageId, wip: 0 }))]);
-				});
-				if (projId) addCardToCol(`col-${projId}-${stageId}`);
+				const stageId = addStage();
+				if (projId) addCardToCol(`col-${projId}-${stageId}`, true);
 			} else {
 				addCardToCol(cell.dataset.colId);
 			}
@@ -5693,30 +5525,20 @@ function wireUpBoardEvents() {
 		const projDropCell = e.target.closest('.proj-drop-zone-cell[data-proj-drop-stage]');
 		const projDropLabel = e.target.closest('.proj-drop-zone-label');
 		if (projDropCell || projDropLabel) {
-			const stageId = projDropCell?.dataset.projDropStage || stages.peek()[0]?.id || 'backlog';
-			const projId = 'p' + Date.now().toString(36);
-			const projName = 'New swimlane';
-			batch(() => {
-				projects.update(all => [...all, { id: projId, name: projName, color: SWATCH_COLORS[all.length % SWATCH_COLORS.length], collapsed: false }]);
-				const stgs = stages.peek();
-				cols.update(all => [...all, ...stgs.map(s => ({ id: `col-${projId}-${s.id}`, name: s.name, pId: projId, stage: s.id, wip: 0 }))]);
-			});
-			addCardToCol(`col-${projId}-${stageId}`);
+			const stageId = projDropCell?.dataset.projDropStage || stages.peek()[0]?.id;
+			pushUndo('new swimlane + card');
+			const projId = addSwimlane();
+			if (stageId) addCardToCol(`col-${projId}-${stageId}`, true);
 			return;
 		}
 
 		// Double-click stage-cell-add → create column + card
 		const stageAddDbl = e.target.closest('.stage-cell-add');
 		if (stageAddDbl) {
-			const stageId = 'stage-' + Date.now().toString(36);
 			const projId = stageAddDbl.dataset.projStageAdd || projects.peek()[0]?.id;
 			pushUndo('new stage + card');
-			batch(() => {
-				stages.update(all => [...all, { id: stageId, name: 'New stage', color: '#7a5040', done: false }]);
-				const projs = projects.peek();
-				cols.update(all => [...all, ...projs.map(p => ({ id: `col-${p.id}-${stageId}`, name: 'New stage', pId: p.id, stage: stageId, wip: 0 }))]);
-			});
-			if (projId) addCardToCol(`col-${projId}-${stageId}`);
+			const stageId = addStage();
+			if (projId) addCardToCol(`col-${projId}-${stageId}`, true);
 			return;
 		}
 	});
@@ -5787,37 +5609,9 @@ function wireUpBoardEvents() {
 			const toId = isStage ? target.dataset.stageId : target.dataset.project;
 			if (toId === sourceId) return;
 
-			if (isStage) {
-				pushUndo('reorder stages');
-				stages.update(all => {
-					const arr = [...all];
-					const from = arr.findIndex(s => s.id === sourceId);
-					const to = arr.findIndex(s => s.id === toId);
-					const [m] = arr.splice(from, 1);
-					arr.splice(to, 0, m);
-					return arr;
-				});
-				const stgs = stages.peek();
-				const newIdx = stgs.findIndex(s => s.id === sourceId);
-				const movedName = stgs[newIdx]?.name;
-				const rel = stgs[newIdx - 1] ? `after ${stgs[newIdx - 1].name}` : `before ${stgs[newIdx + 1]?.name || ''}`;
-				showToast(`${movedName} → ${rel}`);
-			} else {
-				pushUndo('reorder swimlanes');
-				projects.update(all => {
-					const arr = [...all];
-					const from = arr.findIndex(p => p.id === sourceId);
-					const to = arr.findIndex(p => p.id === toId);
-					const [m] = arr.splice(from, 1);
-					arr.splice(to, 0, m);
-					return arr;
-				});
-				const projs = projects.peek();
-				const newIdx = projs.findIndex(p => p.id === sourceId);
-				const movedName = projs[newIdx]?.name;
-				const rel = projs[newIdx - 1] ? `after ${projs[newIdx - 1].name}` : `before ${projs[newIdx + 1]?.name || ''}`;
-				showToast(`${movedName} → ${rel}`);
-			}
+			const rect = target.getBoundingClientRect();
+			if (isStage) reorderSignal(stages, sourceId, toId, ev.clientX >= rect.left + rect.width / 2, 'reorder stages');
+			else reorderSignal(projects, sourceId, toId, ev.clientY >= rect.top + rect.height / 2, 'reorder swimlanes');
 		};
 
 		document.addEventListener('pointermove', onMove, { passive: false });
@@ -6012,19 +5806,6 @@ function wireUpGlobalEvents() {
 				filterInput.blur();
 				return;
 			}
-			// If a focused card is in a collapsed row, uncollapse it
-			const focused = document.querySelector('.card:focus');
-			if (focused) {
-				const swimlane = focused.closest('.swimlane.collapsed');
-				if (swimlane) {
-					const projId = swimlane.dataset?.projId;
-					if (projId) {
-						projects.update(all => all.map(p =>
-							p.id === projId ? { ...p, collapsed: false } : p
-						));
-					}
-				}
-			}
 		}
 	});
 	// Sync clear button and nav visibility with filterStr changes
@@ -6094,7 +5875,7 @@ function wireUpGlobalEvents() {
 			if (navigator.vibrate) navigator.vibrate(50);
 			e.target.value = '';
 			inboxOpen.set(true);
-					showToast(`Added "${title}" to inbox`);
+			showToast(`Added "${title}" to inbox`);
 		}
 	});
 
@@ -6317,8 +6098,9 @@ function wireUpGlobalEvents() {
 		btn.classList.add('active');
 		const cpanel = document.getElementById('cpanel');
 		cpanel.style.background = '';
-		if (btn.dataset.type === 'meeting') cpanel.style.background = 'var(--blue-bg)';
-		if (btn.dataset.type === 'followup') cpanel.style.background = 'var(--yellow-bg)';
+		const bg = btn.dataset.type === 'meeting' ? 'var(--blue-bg)' : btn.dataset.type === 'followup' ? 'var(--yellow-bg)' : '';
+		cpanel.style.background = bg;
+		cpanel.style.setProperty('--panel-bg', bg || 'var(--surface)');
 	});
 
 	// Chip inputs
@@ -6344,30 +6126,17 @@ function wireUpGlobalEvents() {
 		} else {
 			// Create new
 			const id = 'p' + Date.now().toString(36);
-			batch(() => {
-				projects.update(all => [...all, { id, name, color: _selectedProjColor, collapsed: false }]);
-				const stgs = stages.peek();
-				cols.update(all => [
-					...all,
-					...stgs.map(s => ({ id: `col-${id}-${s.id}`, name: s.name, pId: id, stage: s.id, wip: 0 })),
-				]);
-			});
+			projects.update(all => [...all, { id, name, color: _selectedProjColor, collapsed: false }]);
 			showToast(`Swimlane "${name}" created`);
 		}
 		document.getElementById('add-proj-modal').classList.remove('open');
 	});
 	document.getElementById('proj-modal-delete').addEventListener('click', () => {
 		if (!_editingProjId) return;
-		const proj = projects.peek().find(p => p.id === _editingProjId);
-		
 		pushUndo('delete project');
 		batch(() => {
-			// Move cards to inbox
-			cards.update(all => all.map(c =>
-				c.projectId === _editingProjId ? { ...c, columnId: 'inbox-col', projectId: 'inbox' } : c
-			));
+			moveCardsToInbox(c => c.projectId === _editingProjId);
 			projects.update(all => all.filter(p => p.id !== _editingProjId));
-			cols.update(all => all.filter(c => c.pId !== _editingProjId));
 		});
 		document.getElementById('add-proj-modal').classList.remove('open');
 		showToast('Swimlane deleted, cards moved to inbox');
@@ -6396,16 +6165,11 @@ function wireUpGlobalEvents() {
 			});
 			showToast(`Stage "${name}" updated`);
 		} else {
-			const id = name.toLowerCase().replace(/\s+/g, '-');
-			batch(() => {
-				if (isAutomove) stages.update(all => all.map(s => s.automove ? { ...s, automove: false } : s));
-				stages.update(all => [...all, { id, name, color: '#7a5040', done: isDone, automove: isAutomove }]);
-				const projs = projects.peek();
-				cols.update(all => [
-					...all,
-					...projs.map(p => ({ id: `col-${p.id}-${id}`, name, pId: p.id, stage: id, wip: 0 })),
-				]);
-			});
+			const id = uniqueStageId(name);
+			stages.update(all => [
+				...(isAutomove ? all.map(s => s.automove ? { ...s, automove: false } : s) : all),
+				{ id, name, color: '#7a5040', done: isDone, automove: isAutomove },
+			]);
 			showToast(`Stage "${name}" added`);
 		}
 		document.getElementById('add-col-modal').classList.remove('open');
@@ -6419,18 +6183,10 @@ function wireUpGlobalEvents() {
 	});
 	document.getElementById('col-modal-delete').addEventListener('click', () => {
 		if (!_editingStageId) return;
-		const stage = stages.peek().find(s => s.id === _editingStageId);
-		
 		pushUndo('delete stage');
 		batch(() => {
-			cards.update(all => all.map(c => {
-				if (c.columnId.endsWith('-' + _editingStageId)) {
-					return { ...c, columnId: 'inbox-col', projectId: 'inbox' };
-				}
-				return c;
-			}));
+			moveCardsToInbox(c => parseColId(c.columnId).stageId === _editingStageId);
 			stages.update(all => all.filter(s => s.id !== _editingStageId));
-			cols.update(all => all.filter(c => c.stage !== _editingStageId));
 		});
 		document.getElementById('add-col-modal').classList.remove('open');
 		showToast('Stage deleted, cards moved to inbox');
@@ -6445,8 +6201,6 @@ function wireUpGlobalEvents() {
 		document.getElementById('vault-modal').classList.add('open');
 	});
 
-	// Conflict panel
-
 	// Vault import/export
 	document.getElementById('vault-modal-close').addEventListener('click', () => {
 		document.getElementById('vault-modal').classList.remove('open');
@@ -6455,6 +6209,7 @@ function wireUpGlobalEvents() {
 	// Sync panel controls
 	// Auto-reconnect on load
 	(async () => {
+		await _bootReady; // read the local board first, then decide which side is newer
 		const stored = await fileSync._loadHandle();
 		if (stored) {
 			fileSync._handle = stored;
@@ -6545,12 +6300,7 @@ function wireUpGlobalEvents() {
 			try {
 				const data = JSON.parse(ev.target.result);
 				if (!data.cards || !data.stages || !data.projects) throw new Error('Invalid format');
-				pushUndo('import backup');
-				batch(() => {
-					stages.set(data.stages);
-					projects.set(data.projects);
-					cards.set(data.cards);
-				});
+				applyBoard(data, 'import backup');
 				document.getElementById('vault-modal').classList.remove('open');
 				showToast(`Restored ${data.cards.length} cards`);
 			} catch (err) {
@@ -6584,13 +6334,7 @@ function wireUpGlobalEvents() {
 			try {
 				const data = JSON.parse(text);
 				if (data.cards && data.stages && data.projects) {
-					pushUndo('paste backup');
-					batch(() => {
-						stages.set(data.stages);
-						projects.set(data.projects);
-						cards.set(data.cards);
-						cols.set(makeCols(data.projects, data.stages));
-					});
+					applyBoard(data, 'paste backup');
 					document.getElementById('vault-modal').classList.remove('open');
 					showToast(`Pasted ${data.cards.length} cards from clipboard`);
 					return;
@@ -6599,13 +6343,7 @@ function wireUpGlobalEvents() {
 			// Try Obsidian markdown
 			const parsed = parseBoardMd(text);
 			if (parsed.cards.length) {
-				pushUndo('paste markdown');
-				batch(() => {
-					if (parsed.stages.length) stages.set(parsed.stages);
-					if (parsed.projects.length) projects.set(parsed.projects);
-					cards.set(parsed.cards);
-					cols.set(makeCols(projects.peek(), stages.peek()));
-				});
+				applyBoard(parsed, 'paste markdown');
 				document.getElementById('vault-modal').classList.remove('open');
 				showToast(`Pasted ${parsed.cards.length} cards`);
 			} else {
@@ -6621,7 +6359,6 @@ function wireUpGlobalEvents() {
 			stages.set([]);
 			projects.set([]);
 			cards.set([]);
-			cols.set([]);
 		});
 		_undoStack.length = 0;
 		_redoStack.length = 0;
@@ -6812,10 +6549,6 @@ function setupChipInput(inputId, containerId, prefix) {
 }
 
 // ══════════════════════════════════════════════════════════════
-//  Obsidian Kanban format serialiser/parser
-// ══════════════════════════════════════════════════════════════
-
-// ══════════════════════════════════════════════════════════════
 //  CSV Export
 // ══════════════════════════════════════════════════════════════
 
@@ -6827,11 +6560,12 @@ function exportToCsv() {
 	const rows = [header.join(',')];
 	for (const c of allCards) {
 		const proj = projs.find(p => p.id === c.projectId);
-		const stg = stgs.find(s => c.columnId.endsWith(s.id));
+		const stageId = parseColId(c.columnId).stageId;
+		const stg = stgs.find(s => s.id === stageId);
 		const row = [
 			`"${(c.title || '').replace(/"/g, '""')}"`,
-			`"${proj?.name || 'Inbox'}"`,
-			`"${stg?.name || ''}"`,
+			`"${(proj?.name || 'Inbox').replace(/"/g, '""')}"`,
+			`"${(stg?.name || '').replace(/"/g, '""')}"`,
 			c.done ? 'TRUE' : 'FALSE',
 			c.type,
 			`"${(c.assignees || []).join(', ')}"`,
@@ -6901,7 +6635,7 @@ function importFromCsv(text) {
 		}
 
 		if (stageName && !stageSet.has(stageName.toLowerCase())) {
-			const sid = stageName.toLowerCase().replace(/\s+/g, '-');
+			const sid = uniqueStageId(stageName, new Set([...stageSet.values()].map(s => s.id)));
 			const isDone = /^(done|complete|finished)$/i.test(stageName);
 			stageSet.set(stageName.toLowerCase(), {
 				id: sid, name: stageName,
@@ -6911,13 +6645,11 @@ function importFromCsv(text) {
 		}
 
 		const proj = isInbox ? null : swimlaneMap.get(swimName);
-		const stageId = stageName ? stageName.toLowerCase().replace(/\s+/g, '-') : (defaultStages[0]?.id || 'backlog');
-		const colId = isInbox ? 'inbox-col' : `col-${proj.id}-${stageId}`;
 		const projId = isInbox ? 'inbox' : proj.id;
 
 		allCards.push({
-			id: 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
-			title, columnId: colId, projectId: projId, order: i,
+			id: newCardId(), _stageKey: stageName.toLowerCase(),
+			title, columnId: 'inbox-col', projectId: projId, order: i,
 			done, type: ['task','meeting','followup'].includes(type) ? type : 'task',
 			assignees, labels, notes,
 			startDate: startDate && /\d{4}-\d{2}-\d{2}/.test(startDate) ? startDate : null,
@@ -6928,6 +6660,13 @@ function importFromCsv(text) {
 
 	const newStages = stageSet.size > 0 ? [...stageSet.values()] : defaultStages;
 	const newProjects = [...swimlaneMap.values()];
+	// Resolve columns once the stage list is known: rows without a stage go to its first stage
+	for (const c of allCards) {
+		const stageId = stageSet.get(c._stageKey)?.id || newStages[0]?.id;
+		if (c.projectId !== 'inbox' && stageId) c.columnId = `col-${c.projectId}-${stageId}`;
+		else { c.projectId = 'inbox'; c.columnId = 'inbox-col'; }
+		delete c._stageKey;
+	}
 
 	pushUndo('import CSV');
 	batch(() => {
@@ -7037,7 +6776,6 @@ function applyTemplate(key) {
 			stages.set(demo.stages);
 			projects.set(demo.projects);
 			cards.set(demo.cards);
-			cols.set(makeCols(demo.projects, demo.stages));
 			filterStr.set('');
 		});
 		document.getElementById('vault-modal').classList.remove('open');
@@ -7052,22 +6790,15 @@ function applyTemplate(key) {
 	const stageMap = buildStageMap(oldStages, tpl);
 
 	batch(() => {
-		stages.set(structuredClone(tpl));
-		const fallback = tpl[0]?.id;
+		// Remap cards first — parseColId resolves against the old stages
 		cards.update(all => all.map(c => {
 			if (c.projectId === 'inbox') return c;
-			const oldStageId = c.columnId.split('-').pop();
-			const newStageId = stageMap.get(oldStageId);
-			if (newStageId) {
-				return { ...c, columnId: c.columnId.replace(/-[^-]+$/, '-' + newStageId) };
-			}
+			const newStageId = stageMap.get(parseColId(c.columnId).stageId);
+			if (newStageId) return { ...c, columnId: `col-${c.projectId}-${newStageId}` };
 			// Unmatched → inbox
 			return { ...c, columnId: 'inbox-col', projectId: 'inbox' };
 		}));
-		const projs = projects.peek();
-		cols.set(projs.flatMap(p => tpl.map(s => ({
-			id: `col-${p.id}-${s.id}`, name: s.name, pId: p.id, stage: s.id, wip: 0,
-		}))));
+		stages.set(structuredClone(tpl));
 	});
 	document.getElementById('vault-modal').classList.remove('open');
 	showToast(`Applied "${key}" template — Ctrl+Z to undo`);
@@ -7172,11 +6903,11 @@ function showBulkBar() {
 		<span class="bulk-bar__count">${selectedCards.size}</span>
 		<select id="bulk-move-project" title="Move to swimlane">
 			<option value="">Swimlane…</option>
-			${projects.peek().map(p => `<option value="${p.id}">${escHtml(p.name)}</option>`).join('')}
+			${projects.peek().map(p => `<option value="${escHtml(p.id)}">${escHtml(p.name)}</option>`).join('')}
 		</select>
 		<select id="bulk-move-stage" title="Move to stage">
 			<option value="">Stage…</option>
-			${stages.peek().map(s => `<option value="${s.id}">${escHtml(s.name)}</option>`).join('')}
+			${stages.peek().map(s => `<option value="${escHtml(s.id)}">${escHtml(s.name)}</option>`).join('')}
 		</select>
 		<button class="bulk-icon-btn bulk-icon-btn--danger" id="bulk-delete" title="Delete">${ICON_TRASH}</button>
 		<button class="bulk-icon-btn" id="bulk-done" title="Mark done">${ICON_CHECK_SQUARE}</button>
@@ -7192,7 +6923,7 @@ function showBulkBar() {
 		batch(() => {
 			cards.update(all => all.map(c => {
 				if (!selectedCards.has(c.id)) return c;
-				const stageId = c.columnId.split('-').pop();
+				const stageId = parseColId(c.columnId).stageId || stages.peek()[0]?.id; // inbox cards land in the first stage
 				return { ...c, projectId: projId, columnId: `col-${projId}-${stageId}`, _v: Date.now() };
 			}));
 		});
@@ -7300,6 +7031,10 @@ function clearSelection() {
 }
 
 
+// ══════════════════════════════════════════════════════════════
+//  Obsidian Kanban format serialiser/parser
+// ══════════════════════════════════════════════════════════════
+
 function exportToObsidian() {
 	const md = serializeBoardMd();
 	const blob = new Blob([md], { type: 'text/markdown' });
@@ -7322,12 +7057,14 @@ function serializeBoardMd() {
 	md += 'kanban-plugin: detrita\n';
 	md += 'detrita: v1\n';
 	md += 'stages:\n';
+	// JSON strings are valid YAML double-quoted scalars, so names may hold commas and quotes
+	const q = JSON.stringify;
 	for (const s of stgs) {
-		md += `  - { id: "${s.id}", label: "${s.name}", color: "${s.color}"${s.done ? ', done: true' : ''}${s.automove ? ', automove: true' : ''} }\n`;
+		md += `  - { id: ${q(s.id)}, label: ${q(s.name)}, color: ${q(s.color)}${s.done ? ', done: true' : ''}${s.automove ? ', automove: true' : ''} }\n`;
 	}
 	md += 'swimlanes:\n';
 	for (const p of projs) {
-		md += `  - { id: "${p.id}", label: "${p.name}", color: "${p.color}"${p.collapsed ? ', collapsed: true' : ''} }\n`;
+		md += `  - { id: ${q(p.id)}, label: ${q(p.name)}, color: ${q(p.color)}${p.collapsed ? ', collapsed: true' : ''} }\n`;
 	}
 	md += '---\n\n';
 
@@ -7335,54 +7072,29 @@ function serializeBoardMd() {
 	for (const s of stgs) {
 		md += `## ${s.done ? '✓ ' : ''}${s.name}\n\n`;
 		for (const p of projs) {
-			const colId = `col-${p.id}-${s.id}`;
-			const cc = colCards.get(colId) ?? [];
+			const cc = colCards.get(`col-${p.id}-${s.id}`) ?? [];
 			if (cc.length === 0 && projs.length > 1) continue;
-			md += `### ${p.name}\n\n`;
-			for (const c of cc) {
-				const check = c.done ? 'x' : ' ';
-				let line = `- [${check}] ${c.title}`;
-				for (const a of c.assignees) line += ` @${a}`;
-				for (const l of c.labels) line += ` #${l}`;
-				if (c.type === 'meeting') line += ' $meeting';
-				if (c.type === 'followup') line += ' $followup';
-				if (c.startDate) line += ` start:${c.startDate}`;
-				if (c.dueDate) line += ` due:${c.dueDate}`;
-				line += ` ^${c.id}`;
-				md += line + '\n';
-				if (c.notes) {
-					for (const nl of c.notes.split('\n')) {
-						md += `  ${nl}\n`;
-					}
-				}
-			}
-			md += '\n';
+			md += `### ${p.name}\n\n${cc.map(cardToMd).join('')}\n`;
 		}
 	}
 
 	// Inbox
 	const inboxCards = colCards.get('inbox-col') ?? [];
-	if (inboxCards.length > 0) {
-		md += '## Inbox\n\n';
-		for (const c of inboxCards) {
-			const check = c.done ? 'x' : ' ';
-			let line = `- [${check}] ${c.title}`;
-			for (const a of c.assignees) line += ` @${a}`;
-			for (const l of c.labels) line += ` #${l}`;
-			if (c.type === 'meeting') line += ' $meeting';
-			if (c.type === 'followup') line += ' $followup';
-			if (c.dueDate) line += ` due:${c.dueDate}`;
-			line += ` ^${c.id}`;
-			md += line + '\n';
-			if (c.notes) {
-				for (const nl of c.notes.split('\n')) {
-					md += `  ${nl}\n`;
-				}
-			}
-		}
-	}
+	if (inboxCards.length > 0) md += `## Inbox\n\n${inboxCards.map(cardToMd).join('')}`;
 
 	return md;
+}
+
+// One frontmatter list item, `- { id: "x", label: "A, \\"B\\"", done: true }` → { id, label, done }.
+// Values are JSON-style quoted strings or bare words (older files quote without escaping).
+function parseFmItem(line) {
+	const out = {};
+	for (const m of line.matchAll(/(\w+):\s*("(?:[^"\\]|\\.)*"|[^,}]+)/g)) {
+		let v = m[2].trim();
+		if (v.startsWith('"')) { try { v = JSON.parse(v); } catch (_) { v = v.slice(1, -1); } }
+		out[m[1]] = v;
+	}
+	return out;
 }
 
 function parseBoardMd(text) {
@@ -7390,31 +7102,18 @@ function parseBoardMd(text) {
 
 	// Parse YAML frontmatter
 	let fmStages = [], fmSwimlanes = [];
-	let inFrontmatter = false;
 	let fmEnd = 0;
 	if (lines[0]?.trim() === '---') {
-		inFrontmatter = true;
 		for (let i = 1; i < lines.length; i++) {
 			if (lines[i].trim() === '---') { fmEnd = i + 1; break; }
-			const stageMatch = lines[i].match(/^\s+-\s*\{\s*id:\s*"?([^",]+)"?,\s*label:\s*"?([^",]+)"?,\s*color:\s*"?([^",]+)"?(?:,\s*done:\s*(true))?/);
-			if (stageMatch && lines[i - 1]?.trim() === 'stages:' || fmStages.length > 0 && !lines[i].startsWith('swimlanes:')) {
-				// Check context
-			}
 		}
-		// Simpler re-parse
 		const fmText = lines.slice(1, fmEnd - 1).join('\n');
-		const stagesBlock = fmText.match(/stages:\n((?:\s+-[^\n]+\n?)*)/);
-		if (stagesBlock) {
-			for (const m of stagesBlock[1].matchAll(/id:\s*"?([^",}]+)"?,\s*label:\s*"?([^",}]+)"?,\s*color:\s*"?([^",}]+)"?(?:,\s*done:\s*(true))?(?:,\s*automove:\s*(true))?(?:,\s*collapsed:\s*(true))?/g)) {
-				fmStages.push({ id: m[1].trim(), name: m[2].trim(), color: m[3].trim(), done: !!m[4], automove: !!m[5] });
-			}
-		}
-		const swimBlock = fmText.match(/swimlanes:\n((?:\s+-[^\n]+\n?)*)/);
-		if (swimBlock) {
-			for (const m of swimBlock[1].matchAll(/id:\s*"?([^",}]+)"?,\s*label:\s*"?([^",}]+)"?,\s*color:\s*"?([^",}]+)"?(?:,\s*done:\s*(true))?(?:,\s*collapsed:\s*(true))?/g)) {
-				fmSwimlanes.push({ id: m[1].trim(), name: m[2].trim(), color: m[3].trim(), collapsed: !!m[5] });
-			}
-		}
+		const items = (key) => {
+			const block = fmText.match(new RegExp(`${key}:\\n((?:\\s+-[^\\n]+\\n?)*)`));
+			return block ? block[1].split('\n').map(parseFmItem).filter(o => o.id && o.label) : [];
+		};
+		fmStages = items('stages').map(o => ({ id: o.id, name: o.label, color: o.color || '#7a5040', done: o.done === 'true', automove: o.automove === 'true' }));
+		fmSwimlanes = items('swimlanes').map(o => ({ id: o.id, name: o.label, color: o.color || '#2b4abd', collapsed: o.collapsed === 'true' }));
 	}
 
 	// Parse markdown body
@@ -7422,6 +7121,7 @@ function parseBoardMd(text) {
 	const swimMap = new Map(fmSwimlanes.map(s => [s.name, s]));
 	const allCards = [];
 	let currentStage = null;
+	let inInbox = false;
 	let currentSwim = null;
 	let lastCard = null;
 	let cardOrder = 0;
@@ -7432,10 +7132,12 @@ function parseBoardMd(text) {
 		const h2 = line.match(/^##\s+(.+)/);
 		if (h2) {
 			const name = h2[1].trim().replace(/^✓\s*/, '');
-			currentStage = stageMap.get(name)?.id || name.toLowerCase().replace(/\s+/g, '-');
-			if (!stageMap.has(name)) {
-				const isDone = name.toLowerCase() === 'done';
-				fmStages.push({ id: currentStage, name, color: '#7a5040', done: isDone });
+			// "## Inbox" is the inbox, not a stage — unless the board really has a stage by that name
+			inInbox = name.toLowerCase() === 'inbox' && !stageMap.has(name);
+			currentStage = inInbox ? null : stageMap.get(name)?.id;
+			if (!inInbox && !currentStage) {
+				currentStage = uniqueStageId(name, new Set(fmStages.map(s => s.id)));
+				fmStages.push({ id: currentStage, name, color: '#7a5040', done: name.toLowerCase() === 'done' });
 				stageMap.set(name, fmStages[fmStages.length - 1]);
 			}
 			currentSwim = null;
@@ -7461,75 +7163,15 @@ function parseBoardMd(text) {
 			continue;
 		}
 
-		// Card line
-		const taskMatch = line.match(/^-\s+\[([ xX])\]\s+(.+)/);
-		if (taskMatch && currentStage) {
-			const done = taskMatch[1] !== ' ';
-			let rest = taskMatch[2];
-			const assignees = [];
-			const labels = [];
-			let dueDate = null, startDate = null, blockId = null;
-			let type = 'task';
-
-			const idMatch = rest.match(/\s*\^(\S+)\s*$/);
-			if (idMatch) { blockId = idMatch[1]; rest = rest.replace(idMatch[0], ''); }
-
-			const dueMatch = rest.match(/(?:📅\s*|due:)(\d{4}-\d{2}-\d{2})/);
-			if (dueMatch) { dueDate = dueMatch[1]; rest = rest.replace(dueMatch[0], ''); }
-			const startMatch = rest.match(/(?:⏳\s*|start:)(\d{4}-\d{2}-\d{2})/);
-			if (startMatch) { startDate = startMatch[1]; rest = rest.replace(startMatch[0], ''); }
-
-			if (/\$meeting/.test(rest)) { type = 'meeting'; rest = rest.replace(/\$meeting/g, ''); }
-			if (/\$followup/.test(rest)) { type = 'followup'; rest = rest.replace(/\$followup/g, ''); }
-
-			rest = rest.replace(/@(\w+)/g, (_, name) => { assignees.push(name); return ''; });
-			rest = rest.replace(/#(\w+)/g, (_, label) => { labels.push(label); return ''; });
-			const title = rest.trim();
-
-			const isInbox = currentStage === 'inbox';
-			const projId = isInbox ? 'inbox' : (currentSwim?.id || fmSwimlanes[0]?.id || 'p1');
-			const colId = isInbox ? 'inbox-col' : `col-${projId}-${currentStage}`;
-			const cardId = blockId || ('c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5));
-
+		// Card line (task or bare list item)
+		const parsed = (currentStage || inInbox) && parseCardLine(line);
+		if (parsed) {
+			const { blockId, ...fields } = parsed;
+			const projId = inInbox ? 'inbox' : (currentSwim?.id || fmSwimlanes[0]?.id || 'p1');
 			lastCard = {
-				id: cardId, title, columnId: colId, projectId: projId,
-				order: cardOrder++, done, type, assignees, labels,
-				notes: '', startDate, dueDate, _v: Date.now(), _created: Date.now(),
-			};
-			allCards.push(lastCard);
-			continue;
-		}
-
-		// Bare list item (no checkbox)
-		const bareMatch = line.match(/^-\s+(.+)/);
-		if (bareMatch && currentStage) {
-			let rest = bareMatch[1];
-			const assignees = [];
-			const labels = [];
-			let dueDate = null, startDate = null, blockId = null;
-			let type = 'task';
-
-			const idMatch = rest.match(/\s*\^(\S+)\s*$/);
-			if (idMatch) { blockId = idMatch[1]; rest = rest.replace(idMatch[0], ''); }
-			const dueMatch = rest.match(/(?:📅\s*|due:)(\d{4}-\d{2}-\d{2})/);
-			if (dueMatch) { dueDate = dueMatch[1]; rest = rest.replace(dueMatch[0], ''); }
-			const startMatch = rest.match(/(?:⏳\s*|start:)(\d{4}-\d{2}-\d{2})/);
-			if (startMatch) { startDate = startMatch[1]; rest = rest.replace(startMatch[0], ''); }
-			if (/\$meeting/.test(rest)) { type = 'meeting'; rest = rest.replace(/\$meeting/g, ''); }
-			if (/\$followup/.test(rest)) { type = 'followup'; rest = rest.replace(/\$followup/g, ''); }
-			rest = rest.replace(/@(\w+)/g, (_, name) => { assignees.push(name); return ''; });
-			rest = rest.replace(/#(\w+)/g, (_, label) => { labels.push(label); return ''; });
-			const title = rest.trim();
-
-			const isInbox = currentStage === 'inbox';
-			const projId = isInbox ? 'inbox' : (currentSwim?.id || fmSwimlanes[0]?.id || 'p1');
-			const colId = isInbox ? 'inbox-col' : `col-${projId}-${currentStage}`;
-			const cardId = blockId || ('c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5));
-
-			lastCard = {
-				id: cardId, title, columnId: colId, projectId: projId,
-				order: cardOrder++, done: false, type, assignees, labels,
-				notes: '', startDate, dueDate, _v: Date.now(), _created: Date.now(),
+				id: blockId || newCardId(), ...fields,
+				columnId: inInbox ? 'inbox-col' : `col-${projId}-${currentStage}`, projectId: projId,
+				order: cardOrder++, notes: '', _v: Date.now(), _created: Date.now(),
 			};
 			allCards.push(lastCard);
 			continue;
@@ -7562,6 +7204,39 @@ function parseBoardMd(text) {
 	return { stages: fmStages, projects: fmSwimlanes, cards: allCards };
 }
 
+// Fill in any fields an imported card lacks, so rendering never trips over a missing array.
+function normalizeCard(c) {
+	return {
+		title: '', order: 0, done: false, type: 'task', notes: '', startDate: null, dueDate: null,
+		...c,
+		id: String(c.id),
+		assignees: Array.isArray(c.assignees) ? c.assignees.map(String) : [],
+		labels: Array.isArray(c.labels) ? c.labels.map(String) : [],
+	};
+}
+
+// Replace the board with parsed, imported or saved data. Cards that already exist keep their
+// creation time, so a sync or re-import doesn't reset every card's age.
+function applyBoard(data, action) {
+	if (action) pushUndo(action);
+	const prev = cardMap.peek();
+	batch(() => {
+		if (data.stages?.length) stages.set(data.stages);
+		if (data.projects?.length) projects.set(data.projects);
+		cards.set((Array.isArray(data.cards) ? data.cards : []).filter(c => c?.id != null && c.columnId).map(c => {
+			const card = normalizeCard(c);
+			const old = prev.get(card.id);
+			return old?._created ? { ...card, _created: old._created } : card;
+		}));
+	});
+}
+
+// Move matching cards to the end of the inbox, keeping their relative order.
+function moveCardsToInbox(pred) {
+	let order = cardsByColumn.peek().get('inbox-col')?.length ?? 0;
+	cards.update(all => all.map(c => pred(c) ? { ...c, columnId: 'inbox-col', projectId: 'inbox', order: order++ } : c));
+}
+
 // ══════════════════════════════════════════════════════════════
 //  FileSync — File System Access API + change detection
 // ══════════════════════════════════════════════════════════════
@@ -7588,14 +7263,15 @@ class FileSync {
 				suggestedName: 'board.md',
 				types: [{ description: 'Markdown', accept: { 'text/markdown': ['.md'] } }],
 			});
-			await this._readFromFile();
-			this._enabled = true;
+			this._enabled = true; // before reading, so an empty file gets the board written to it
+			await this._readFromFile(false);
 			this._startPolling();
 			this._persistHandle();
 			this._updateUI(true);
 			showToast('Syncing to ' + this._handle.name);
 			return true;
 		} catch (e) {
+			this._enabled = false;
 			if (e.name !== 'AbortError') showToast('File sync failed');
 			return false;
 		}
@@ -7611,13 +7287,14 @@ class FileSync {
 		try {
 			const perm = await this._handle.requestPermission({ mode: 'readwrite' });
 			if (perm !== 'granted') { showToast('Permission denied'); return false; }
-			await this._readFromFile();
 			this._enabled = true;
+			await this._readFromFile(true);
 			this._startPolling();
 			this._updateUI(true);
 			showToast('Reconnected to ' + this._handle.name);
 			return true;
 		} catch (e) {
+			this._enabled = false;
 			showToast('Reconnect failed');
 			return false;
 		}
@@ -7632,21 +7309,20 @@ class FileSync {
 		showToast('File sync disconnected');
 	}
 
-	async _readFromFile() {
+	// On reconnect (`keepNewer`), the board edited here since the file was last written wins;
+	// otherwise — or if the file changed more recently — the file's content is loaded.
+	async _readFromFile(keepNewer) {
 		const file = await this._handle.getFile();
 		const text = await file.text();
 		this._lastModTime = file.lastModified;
 		this._lastHash = await this._hash(text);
 
-		if (text.trim()) {
-			const parsed = parseBoardMd(text);
-			batch(() => {
-				stages.set(parsed.stages);
-				projects.set(parsed.projects);
-				cards.set(parsed.cards);
-			});
+		let localModified = 0;
+		try { localModified = Number(localStorage.getItem(LOCAL_MODIFIED_KEY)) || 0; } catch (_) {}
+		if (text.trim() && !(keepNewer && localModified > file.lastModified)) {
+			applyBoard(parseBoardMd(text), 'load from file');
 		} else {
-			// New/empty file — write current board to it
+			// New/empty file, or local edits newer than the file — write the current board to it
 			await this.save();
 		}
 	}
@@ -7654,6 +7330,7 @@ class FileSync {
 	async save() {
 		if (!this._enabled || !this._handle || this._saving) return;
 		this._saving = true;
+		this._dirty = false; // cleared before serialising, so edits made during the write stay dirty
 		try {
 			const md = serializeBoardMd();
 			const hash = await this._hash(md);
@@ -7664,8 +7341,8 @@ class FileSync {
 			await writable.close();
 			this._lastHash = hash;
 			this._lastModTime = Date.now();
-			this._dirty = false;
 		} catch (e) {
+			this._dirty = true;
 			console.warn('File sync save failed:', e);
 			showToast('Sync save failed');
 		}
@@ -7714,12 +7391,7 @@ class FileSync {
 			if (hash === this._lastHash) return;
 
 			// External change detected
-			const parsed = parseBoardMd(text);
-			batch(() => {
-				stages.set(parsed.stages);
-				projects.set(parsed.projects);
-				cards.set(parsed.cards);
-			});
+			applyBoard(parseBoardMd(text), 'sync from disk');
 			this._lastHash = hash;
 			this._lastModTime = file.lastModified;
 			showToast('Board updated from disk');
@@ -7793,11 +7465,7 @@ function importFromObsidian(file) {
 		try {
 			const text = e.target.result;
 			const parsed = parseBoardMd(text);
-			batch(() => {
-				stages.set(parsed.stages);
-				projects.set(parsed.projects);
-				cards.set(parsed.cards);
-			});
+			applyBoard(parsed, 'import markdown');
 			document.getElementById('vault-modal').classList.remove('open');
 			showToast(`Imported ${parsed.cards.length} cards`);
 		} catch (err) {
@@ -7820,59 +7488,25 @@ function toggleTheme() {
 	document.getElementById('icon-sun').style.display = isDark ? 'none' : '';
 	document.querySelector('meta[name="theme-color"]').content = isDark ? '#e3dedb' : '#2b0000';
 	try { localStorage.setItem('detrita-theme', html.dataset.theme); } catch (_) {}
+	// Avatar/label colours depend on the theme but aren't part of the card signature,
+	// so drop the cached HTML and each card's signature to force a repaint.
 	_cardHtmlCache.clear();
+	document.querySelectorAll('.card[data-card-id]').forEach(el => { el._sig = null; });
 	renderBoard();
 	renderInbox();
 	requestAnimationFrame(() => s.remove());
 }
 
-// ── Service Worker for offline caching ──
+// ── Service worker for offline use ──
+// sw.js is a static file served next to the app (built from src/sw.js). Service workers
+// need http(s); on file:// there is none, and none is needed — everything is inlined.
 try {
-	if ('serviceWorker' in navigator && navigator.serviceWorker && location.protocol !== 'file:') {
-	const SW_CODE = `
-		const CACHE = 'detrita-v3';
-		const ASSETS = ['/'];
-
-		self.addEventListener('install', (e) => {
-			e.waitUntil(
-				caches.open(CACHE).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting())
-			);
+	if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+		window.addEventListener('load', () => {
+			navigator.serviceWorker.register('sw.js').catch((err) => console.warn('Offline mode unavailable:', err));
 		});
-
-		self.addEventListener('activate', (e) => {
-			e.waitUntil(
-				caches.keys().then(keys =>
-					Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
-				).then(() => self.clients.claim())
-			);
-		});
-
-		self.addEventListener('fetch', (e) => {
-			if (e.request.method !== 'GET') return;
-			e.respondWith(
-				caches.match(e.request).then(cached => {
-					const fetchP = fetch(e.request).then(resp => {
-						if (resp.ok) {
-							const clone = resp.clone();
-							caches.open(CACHE).then(c => c.put(e.request, clone));
-						}
-						return resp;
-					}).catch(() => cached);
-					return cached || fetchP;
-				})
-			);
-		});
-
-		self.addEventListener('message', (e) => {
-			if (e.data === 'skipWaiting') self.skipWaiting();
-		});
-	`;
-	const swBlob = new Blob([SW_CODE], { type: 'application/javascript' });
-	const swUrl = URL.createObjectURL(swBlob);
-	navigator.serviceWorker.register(swUrl).catch(() => {});
-}
-} catch (_) { /* SW unavailable in sandbox */ }
-
+	}
+} catch (_) { /* service workers unavailable (e.g. sandboxed iframe) */ }
 // ── Boot ──
 document.addEventListener('DOMContentLoaded', initApp);
 </script>

@@ -51,7 +51,7 @@ test('help panel shows the current version', async ({ page }) => {
 	await page.locator('#btn-help').click({ force: true });
 	const panel = page.locator('.help-panel');
 	await expect(panel).toBeVisible();
-	await expect(panel).toContainText('0.85.0 (2026-08-05)');
+	await expect(panel).toContainText('0.86.0 (2026-10-12)');
 });
 
 test('links a valid web app manifest served as a separate file', async ({ page }) => {
@@ -80,4 +80,18 @@ test('links a valid web app manifest served as a separate file', async ({ page }
 		const status = await page.evaluate(async (src) => (await fetch(src)).status, icon.src);
 		expect(status, `icon ${icon.src} is reachable`).toBe(200);
 	}
+});
+
+test('works offline after the first visit', async ({ page, context }) => {
+	await page.goto('/');
+	await page.evaluate(() => navigator.serviceWorker.ready);
+	// The page that installed the worker isn't controlled yet; reload once while online.
+	await page.reload();
+	await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller)).toBe(true);
+
+	await context.setOffline(true);
+	await page.reload();
+	await expect(page.locator('#board')).toBeVisible();
+	await expect.poll(() => page.locator('#board').evaluate((el) => el.children.length)).toBeGreaterThan(3);
+	await context.setOffline(false);
 });

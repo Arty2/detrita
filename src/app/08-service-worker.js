@@ -1,47 +1,10 @@
-// ── Service Worker for offline caching ──
+// ── Service worker for offline use ──
+// sw.js is a static file served next to the app (built from src/sw.js). Service workers
+// need http(s); on file:// there is none, and none is needed — everything is inlined.
 try {
-	if ('serviceWorker' in navigator && navigator.serviceWorker && location.protocol !== 'file:') {
-	const SW_CODE = `
-		const CACHE = 'detrita-v3';
-		const ASSETS = ['/'];
-
-		self.addEventListener('install', (e) => {
-			e.waitUntil(
-				caches.open(CACHE).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting())
-			);
+	if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+		window.addEventListener('load', () => {
+			navigator.serviceWorker.register('sw.js').catch((err) => console.warn('Offline mode unavailable:', err));
 		});
-
-		self.addEventListener('activate', (e) => {
-			e.waitUntil(
-				caches.keys().then(keys =>
-					Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
-				).then(() => self.clients.claim())
-			);
-		});
-
-		self.addEventListener('fetch', (e) => {
-			if (e.request.method !== 'GET') return;
-			e.respondWith(
-				caches.match(e.request).then(cached => {
-					const fetchP = fetch(e.request).then(resp => {
-						if (resp.ok) {
-							const clone = resp.clone();
-							caches.open(CACHE).then(c => c.put(e.request, clone));
-						}
-						return resp;
-					}).catch(() => cached);
-					return cached || fetchP;
-				})
-			);
-		});
-
-		self.addEventListener('message', (e) => {
-			if (e.data === 'skipWaiting') self.skipWaiting();
-		});
-	`;
-	const swBlob = new Blob([SW_CODE], { type: 'application/javascript' });
-	const swUrl = URL.createObjectURL(swBlob);
-	navigator.serviceWorker.register(swUrl).catch(() => {});
-}
-} catch (_) { /* SW unavailable in sandbox */ }
-
+	}
+} catch (_) { /* service workers unavailable (e.g. sandboxed iframe) */ }

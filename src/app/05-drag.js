@@ -60,6 +60,38 @@ function _makeDragDot() {
 	return c;
 }
 
+// Create a swimlane / stage on the fly (drop or double-click on the "+" zones).
+function addSwimlane() {
+	const id = 'p' + Date.now().toString(36);
+	projects.update(all => [...all, { id, name: 'New swimlane', color: SWATCH_COLORS[all.length % SWATCH_COLORS.length], collapsed: false }]);
+	return id;
+}
+
+function addStage() {
+	const id = 'stage-' + Date.now().toString(36);
+	stages.update(all => [...all, { id, name: 'New stage', color: '#7a5040', done: false }]);
+	return id;
+}
+
+function dropIntoNewSwimlane(cardIds, stageId) {
+	pushUndo('new swimlane');
+	const projId = addSwimlane();
+	const target = stageId || stages.peek()[0]?.id;
+	if (target) for (const id of cardIds) moveCard(id, `col-${projId}-${target}`, null, true);
+	showToast('Created new swimlane');
+}
+
+function dropIntoNewStage(cardIds, rowProjId) {
+	pushUndo('new stage');
+	const stageId = addStage();
+	for (const id of cardIds) {
+		const c = cardMap.peek().get(id);
+		const projId = rowProjId || (c?.projectId && c.projectId !== 'inbox' ? c.projectId : projects.peek()[0]?.id);
+		if (projId) moveCard(id, `col-${projId}-${stageId}`, null, true);
+	}
+	showToast('Created new stage');
+}
+
 function initDragAndDrop() {
 	// Keep native DnD for mouse on desktop
 	document.addEventListener('dragstart', (e) => {
@@ -109,7 +141,7 @@ function initDragAndDrop() {
 			if (tempBadge) tempBadge.remove();
 			card.classList.add('dragging');
 			selectedCards.forEach(id => {
-				const el = document.querySelector(`.card[data-card-id="${id}"]`);
+				const el = cardEl(id);
 				if (el) el.classList.add('dragging');
 			});
 		});
@@ -123,8 +155,6 @@ function initDragAndDrop() {
 		clearHover();
 		clearIndicator();
 		document.querySelector('.inbox-toggle')?.classList.remove('drop-hover');
-		const badge = document.getElementById('drag-count-badge');
-		if (badge) { badge._cleanup?.(); badge.remove(); }
 	});
 
 	let _inboxDragTimer = null;
@@ -176,27 +206,15 @@ function initDragAndDrop() {
 			c.classList.toggle('shrink-delete', !!brandZone);
 		});
 		if (cell) {
-			clearIndicator();
-			const isCollapsed = cell.closest('.swimlane.collapsed');
-			if (isCollapsed) {
-				const indicator = document.createElement('div');
-				indicator.className = 'drop-indicator';
-				indicator.style.cssText = 'margin:0 auto;width:60%;position:absolute;bottom:4px;left:20%;right:20%;';
-				cell.appendChild(indicator);
-				_activeIndicator = indicator;
+			if (cell.closest('.swimlane.collapsed')) {
+				showCollapsedDropIndicator(cell);
 			} else {
 				const container = cell.classList.contains('inbox-list') ? cell : cell.querySelector('.col-cards');
-				if (container) {
-					const existingCards = container.querySelectorAll('.card:not(.dragging)');
-					if (existingCards.length > 0) {
-						const after = getInsertionPoint(e.clientY, container);
-						const indicator = document.createElement('div');
-						indicator.className = 'drop-indicator';
-						container.insertBefore(indicator, after);
-						_activeIndicator = indicator;
-					}
-				}
+				if (container) showDropIndicator(container, getInsertionPoint(e.clientY, container));
+				else clearIndicator();
 			}
+		} else {
+			clearIndicator();
 		}
 		startAutoScroll(e.clientX, e.clientY);
 	}
@@ -237,34 +255,9 @@ function initDragAndDrop() {
 			if (cardIds.length > 1) pushUndo('move cards to inbox');
 			for (const id of cardIds) moveCard(id, 'inbox-col', null, cardIds.length > 1);
 		} else if (projZone) {
-			const stageId = projZone.dataset?.projDropStage || stages.peek()[0]?.id || 'backlog';
-			const projId = 'p' + Date.now().toString(36);
-			batch(() => {
-				projects.update(all => [...all, { id: projId, name: 'New swimlane', color: SWATCH_COLORS[all.length % SWATCH_COLORS.length], collapsed: false }]);
-				const stgs = stages.peek();
-				cols.update(all => [...all, ...stgs.map(s => ({ id: `col-${projId}-${s.id}`, name: s.name, pId: projId, stage: s.id, wip: 0 }))]);
-			});
-			setTimeout(() => { pushUndo('move cards'); for (const id of cardIds) moveCard(id, `col-${projId}-${stageId}`, null, true); }, 50);
-			showToast('Created new swimlane');
+			dropIntoNewSwimlane(cardIds, projZone.dataset?.projDropStage);
 		} else if (stageZone) {
-			// Create new stage and move cards there
-			const stageId = 'stage-' + Date.now().toString(36);
-			const stageName = 'New stage';
-			const rowProjId = stageZone.dataset.projStageAdd;
-			pushUndo('new stage');
-			batch(() => {
-				stages.update(all => [...all, { id: stageId, name: stageName, color: '#7a5040', done: false }]);
-				const projs = projects.peek();
-				cols.update(all => [...all, ...projs.map(p => ({ id: `col-${p.id}-${stageId}`, name: stageName, pId: p.id, stage: stageId, wip: 0 }))]);
-			});
-			setTimeout(() => {
-				for (const id of cardIds) {
-					const card = cardMap.peek().get(id);
-					const projId = rowProjId || (card?.projectId && card.projectId !== 'inbox' ? card.projectId : projects.peek()[0]?.id);
-					if (projId) moveCard(id, `col-${projId}-${stageId}`, null, true);
-				}
-			}, 50);
-			showToast('Created new stage');
+			dropIntoNewStage(cardIds, stageZone.dataset?.projStageAdd);
 		}
 		clearSelection();
 		clearHover();
@@ -282,7 +275,7 @@ function startMultiDrag(card, cardId, rect, offsetX, offsetY, startEvent) {
 	}
 	card.classList.add('dragging');
 	selectedCards.forEach(id => {
-		const el = document.querySelector(`.card[data-card-id="${id}"]`);
+		const el = cardEl(id);
 		if (el && el !== card) el.classList.add('dragging');
 	});
 
@@ -321,7 +314,6 @@ function startMultiDrag(card, cardId, rect, offsetX, offsetY, startEvent) {
 		const brandZone = el?.closest('.brand');
 		const overInboxBar = el?.closest('.inbox-toggle, .bottom-bar');
 		clearHover();
-		clearIndicator();
 
 		const overInbox = inbox || el?.closest('.inbox-panel');
 		if (overInboxBar || overInbox) {
@@ -335,19 +327,17 @@ function startMultiDrag(card, cardId, rect, offsetX, offsetY, startEvent) {
 		const target = cell || inbox || projZone || stageZone || brandZone;
 		if (target) {
 			setHover(target);
-			if (cell || inbox) {
+			if (cell?.closest('.swimlane.collapsed')) {
+				showCollapsedDropIndicator(cell);
+			} else if (cell || inbox) {
 				const container = cell ? cell.querySelector('.col-cards') : inbox;
-				if (container) {
-					const existingCards = container.querySelectorAll('.card:not(.dragging)');
-					if (existingCards.length > 0) {
-						const indicator = document.createElement('div');
-						indicator.className = 'drop-indicator';
-						const after = getInsertionPoint(ev.clientY, container);
-						container.insertBefore(indicator, after);
-						_activeIndicator = indicator;
-					}
-				}
+				if (container) showDropIndicator(container, getInsertionPoint(ev.clientY, container));
+				else clearIndicator();
+			} else {
+				clearIndicator();
 			}
+		} else {
+			clearIndicator();
 		}
 		if (ghost) {
 			if (brandZone && !ghostShrunk) {
@@ -377,7 +367,7 @@ function startMultiDrag(card, cardId, rect, offsetX, offsetY, startEvent) {
 		ghost.remove();
 		card.classList.remove('dragging');
 		selectedCards.forEach(id => {
-			const el = document.querySelector(`.card[data-card-id="${id}"]`);
+			const el = cardEl(id);
 			if (el) el.classList.remove('dragging');
 		});
 		delete document.body.dataset.dragging;
@@ -405,34 +395,11 @@ function startMultiDrag(card, cardId, rect, offsetX, offsetY, startEvent) {
 		} else if (inbox) {
 			const after = getInsertionPoint(ev.clientY, inbox);
 			pushUndo('move cards to inbox');
-			for (const id of dragIds) moveCardInbox(id, after, true);
+			for (const id of dragIds) moveCard(id, 'inbox-col', after, true);
 		} else if (projZone) {
-			const stageId = projZone.dataset?.projDropStage || stages.peek()[0]?.id || 'backlog';
-			const projId = 'p' + Date.now().toString(36);
-			batch(() => {
-				projects.update(all => [...all, { id: projId, name: 'New swimlane', color: SWATCH_COLORS[all.length % SWATCH_COLORS.length], collapsed: false }]);
-				const stgs = stages.peek();
-				cols.update(all => [...all, ...stgs.map(s => ({ id: `col-${projId}-${s.id}`, name: s.name, pId: projId, stage: s.id, wip: 0 }))]);
-			});
-			setTimeout(() => { pushUndo('move cards'); for (const id of dragIds) moveCard(id, `col-${projId}-${stageId}`, null, true); }, 50);
-			showToast('Created new swimlane');
+			dropIntoNewSwimlane(dragIds, projZone.dataset?.projDropStage);
 		} else if (stageZone) {
-			const stageId = 'stage-' + Date.now().toString(36);
-			const rowProjId = stageZone.dataset?.projStageAdd;
-			pushUndo('new stage');
-			batch(() => {
-				stages.update(all => [...all, { id: stageId, name: 'New stage', color: '#7a5040', done: false }]);
-				const projs = projects.peek();
-				cols.update(all => [...all, ...projs.map(p => ({ id: `col-${p.id}-${stageId}`, name: 'New stage', pId: p.id, stage: stageId, wip: 0 }))]);
-			});
-			setTimeout(() => {
-				for (const id of dragIds) {
-					const c = cardMap.peek().get(id);
-					const pId = rowProjId || (c?.projectId && c.projectId !== 'inbox' ? c.projectId : projects.peek()[0]?.id);
-					if (pId) moveCard(id, `col-${pId}-${stageId}`, null, true);
-				}
-			}, 50);
-			showToast('Created new stage');
+			dropIntoNewStage(dragIds, stageZone.dataset?.projStageAdd);
 		}
 	};
 
@@ -556,7 +523,6 @@ function onPointerDown(e) {
 		const brandZone = el?.closest('.brand');
 		const overInboxBar = el?.closest('.inbox-toggle, .bottom-bar');
 		clearHover();
-		clearIndicator();
 
 		// Auto-open inbox on hover, auto-close when leaving
 		const overInbox = inbox || el?.closest('.inbox-panel');
@@ -571,30 +537,17 @@ function onPointerDown(e) {
 		const target = cell || inbox || projZone || stageZone || brandZone;
 		if (target) {
 			setHover(target);
-			if (cell || inbox) {
-				const isCollapsed = cell?.closest('.swimlane.collapsed');
-				if (isCollapsed && cell) {
-					clearIndicator();
-					const indicator = document.createElement('div');
-					indicator.className = 'drop-indicator';
-					indicator.style.cssText = 'margin:0 auto;width:60%;position:absolute;bottom:4px;left:20%;right:20%;';
-					cell.appendChild(indicator);
-					_activeIndicator = indicator;
-				} else {
-					const container = cell ? cell.querySelector('.col-cards') : inbox;
-					if (container) {
-						clearIndicator();
-						const existingCards = container.querySelectorAll('.card:not(.dragging)');
-						if (existingCards.length > 0) {
-							const after = getInsertionPoint(ev.clientY, container);
-							const indicator = document.createElement('div');
-							indicator.className = 'drop-indicator';
-							container.insertBefore(indicator, after);
-							_activeIndicator = indicator;
-						}
-					}
-				}
+			if (cell?.closest('.swimlane.collapsed')) {
+				showCollapsedDropIndicator(cell);
+			} else if (cell || inbox) {
+				const container = cell ? cell.querySelector('.col-cards') : inbox;
+				if (container) showDropIndicator(container, getInsertionPoint(ev.clientY, container));
+				else clearIndicator();
+			} else {
+				clearIndicator();
 			}
+		} else {
+			clearIndicator();
 		}
 		// Ghost shrink over delete zone
 		if (ghost) {
@@ -661,32 +614,11 @@ function onPointerDown(e) {
 		} else if (inbox) {
 			const after = getInsertionPoint(ev.clientY, inbox);
 			if (dragIds.length > 1) pushUndo('move cards to inbox');
-			for (const id of dragIds) moveCardInbox(id, after, dragIds.length > 1);
+			for (const id of dragIds) moveCard(id, 'inbox-col', after, dragIds.length > 1);
 		} else if (projZone) {
-			const stageId = projZone.dataset?.projDropStage || stages.peek()[0]?.id || 'backlog';
-			const projId = 'p' + Date.now().toString(36);
-			batch(() => {
-				projects.update(all => [...all, { id: projId, name: 'New swimlane', color: SWATCH_COLORS[all.length % SWATCH_COLORS.length], collapsed: false }]);
-				const stgs = stages.peek();
-				cols.update(all => [...all, ...stgs.map(s => ({ id: `col-${projId}-${s.id}`, name: s.name, pId: projId, stage: s.id, wip: 0 }))]);
-			});
-			setTimeout(() => { pushUndo('move cards'); for (const id of dragIds) moveCard(id, `col-${projId}-${stageId}`, null, true); }, 50);
+			dropIntoNewSwimlane(dragIds, projZone.dataset?.projDropStage);
 		} else if (stageZone) {
-			const stageId = 'stage-' + Date.now().toString(36);
-			const rowProjId = stageZone.dataset?.projStageAdd;
-			pushUndo('new stage');
-			batch(() => {
-				stages.update(all => [...all, { id: stageId, name: 'New stage', color: '#7a5040', done: false }]);
-				const projs = projects.peek();
-				cols.update(all => [...all, ...projs.map(p => ({ id: `col-${p.id}-${stageId}`, name: 'New stage', pId: p.id, stage: stageId, wip: 0 }))]);
-			});
-			setTimeout(() => {
-				for (const id of dragIds) {
-					const c = cardMap.peek().get(id);
-					const projId = rowProjId || (c?.projectId && c.projectId !== 'inbox' ? c.projectId : projects.peek()[0]?.id);
-					if (projId) moveCard(id, `col-${projId}-${stageId}`, null, true);
-				}
-			}, 50);
+			dropIntoNewStage(dragIds, stageZone.dataset?.projStageAdd);
 		}
 		clearSelection();
 	};
@@ -696,69 +628,34 @@ function onPointerDown(e) {
 	document.addEventListener('pointercancel', onUp);
 }
 
-function moveCardInbox(cardId, beforeEl, skipUndo) {
-	if (!skipUndo) pushUndo('move card to inbox');
-	_movedCards.add(cardId);
-	batch(() => {
-		const allCards = cards.peek();
-		const idx = allCards.findIndex(c => c.id === cardId);
-		if (idx === -1) return;
-		const card = { ...allCards[idx] };
-		card.columnId = 'inbox-col';
-		card.projectId = 'inbox';
-		card._v = Date.now();
-
-		const colCards = allCards.filter(c => c.columnId === 'inbox-col' && c.id !== cardId);
-		if (beforeEl) {
-			const beforeId = beforeEl.dataset?.cardId;
-			const beforeIdx = colCards.findIndex(c => c.id === beforeId);
-			if (beforeIdx >= 0) {
-				card.order = beforeIdx;
-				colCards.splice(beforeIdx, 0, card);
-			} else {
-				card.order = colCards.length;
-				colCards.push(card);
-			}
-		} else {
-			card.order = colCards.length;
-			colCards.push(card);
-		}
-		colCards.forEach((c, i) => { c.order = i; });
-		const next = allCards.map(c => {
-			if (c.id === cardId) return card;
-			const updated = colCards.find(cc => cc.id === c.id);
-			return updated ? { ...c, order: updated.order } : c;
-		});
-		cards.set(next);
-	});
-}
-
-let _rectCache = new WeakMap();
-let _rectCacheFrame = -1;
-
-function getCachedRect(el) {
-	const frame = _rectCacheFrame;
-	if (frame !== _currentFrame) {
-		_rectCache = new WeakMap();
-		_rectCacheFrame = _currentFrame;
-	}
-	let r = _rectCache.get(el);
-	if (!r) {
-		r = el.getBoundingClientRect();
-		_rectCache.set(el, r);
-	}
-	return r;
-}
-
-let _currentFrame = 0;
-(function tickFrame() { _currentFrame++; requestAnimationFrame(tickFrame); })();
-
 function getInsertionPoint(y, container) {
-	const cards = [...container.querySelectorAll('.card:not(.dragging)')];
-	return cards.find(c => {
-		const box = getCachedRect(c);
-		return y < box.top + box.height / 2;
-	}) ?? null;
+	for (const c of container.querySelectorAll('.card:not(.dragging)')) {
+		const box = c.getBoundingClientRect();
+		if (y < box.top + box.height / 2) return c;
+	}
+	return null;
+}
+
+// Show the drop line before `after` (null = end); reuses the existing line when it's
+// already in place so dragover doesn't churn the DOM and force a relayout every frame.
+function showDropIndicator(container, after) {
+	if (_activeIndicator && _activeIndicator.parentNode === container && _activeIndicator.nextElementSibling === after) return;
+	clearIndicator();
+	if (!container.querySelector('.card:not(.dragging)')) return;
+	const indicator = document.createElement('div');
+	indicator.className = 'drop-indicator';
+	container.insertBefore(indicator, after);
+	_activeIndicator = indicator;
+}
+
+function showCollapsedDropIndicator(cell) {
+	if (_activeIndicator && _activeIndicator.parentNode === cell) return;
+	clearIndicator();
+	const indicator = document.createElement('div');
+	indicator.className = 'drop-indicator';
+	indicator.style.cssText = 'margin:0 auto;width:60%;position:absolute;bottom:4px;left:20%;right:20%;';
+	cell.appendChild(indicator);
+	_activeIndicator = indicator;
 }
 
 function toggleCardDone(cardId) {
@@ -784,62 +681,32 @@ function toggleCardDone(cardId) {
 
 function moveCard(cardId, newColId, beforeEl, skipUndo) {
 	const currentCard = cardMap.peek().get(cardId);
-	if (currentCard && currentCard.columnId === newColId && !beforeEl) {
-		const colCards = cards.peek().filter(c => c.columnId === newColId);
+	if (!currentCard) return;
+	if (currentCard.columnId === newColId && !beforeEl) {
+		const colCards = cardsByColumn.peek().get(newColId) ?? [];
 		if (colCards.length <= 1) return;
 	}
 	if (!skipUndo) pushUndo('move card');
-	if (!currentCard || currentCard.columnId !== newColId) _movedCards.add(cardId);
-	batch(() => {
-		const allCards = cards.peek();
-		const idx = allCards.findIndex(c => c.id === cardId);
-		if (idx === -1) return;
+	if (currentCard.columnId !== newColId) _movedCards.add(cardId);
 
-		const card = { ...allCards[idx] };
-		let newProjectId;
-		if (newColId === 'inbox-col') {
-			newProjectId = 'inbox';
-		} else {
-			const parts = newColId.split('-');
-			newProjectId = parts.length >= 3 ? parts.slice(1, -1).join('-') : card.projectId;
-			const newStage = parts[parts.length - 1];
-			const stg = stages.peek().find(s => s.id === newStage);
-			// Only force done=true when moving to a done-column; otherwise keep existing state
-			if (stg?.done) card.done = true;
-		}
+	const card = { ...currentCard, columnId: newColId, _v: Date.now() };
+	const { projectId, stageId } = parseColId(newColId);
+	card.projectId = projectId;
+	// Only force done=true when moving to a done-column; otherwise keep existing state
+	if (stageId && stages.peek().find(s => s.id === stageId)?.done) card.done = true;
 
-		card.columnId = newColId;
-		card.projectId = newProjectId === 'inbox' ? 'inbox' : newProjectId;
-		card._v = Date.now();
+	// Recalculate order within the target column
+	const colCards = (cardsByColumn.peek().get(newColId) ?? []).filter(c => c.id !== cardId);
+	const beforeIdx = beforeEl ? colCards.findIndex(c => c.id === beforeEl.dataset?.cardId) : -1;
+	if (beforeIdx >= 0) colCards.splice(beforeIdx, 0, card);
+	else colCards.push(card);
+	const orderMap = new Map(colCards.map((c, i) => [c.id, i]));
 
-		// Recalculate order
-		const colCards = allCards.filter(c => c.columnId === newColId && c.id !== cardId);
-		if (beforeEl) {
-			const beforeId = beforeEl.dataset?.cardId;
-			const beforeIdx = colCards.findIndex(c => c.id === beforeId);
-			if (beforeIdx >= 0) {
-				card.order = beforeIdx;
-				colCards.splice(beforeIdx, 0, card);
-			} else {
-				card.order = colCards.length;
-				colCards.push(card);
-			}
-		} else {
-			card.order = colCards.length;
-			colCards.push(card);
-		}
-
-		// Renumber
-		colCards.forEach((c, i) => { c.order = i; });
-
-		const next = allCards.map(c => {
-			if (c.id === cardId) return card;
-			const updated = colCards.find(cc => cc.id === c.id);
-			return updated ? { ...c, order: updated.order } : c;
-		});
-
-		cards.set(next);
-		});
+	cards.set(cards.peek().map(c => {
+		if (c.id === cardId) return { ...card, order: orderMap.get(cardId) };
+		const order = orderMap.get(c.id);
+		return order != null && order !== c.order ? { ...c, order } : c;
+	}));
 	if (navigator.vibrate) navigator.vibrate(50);
 }
 
@@ -937,7 +804,7 @@ function clearCountHighlights() {
 
 function highlightCollapsedCount(entry) {
 	clearCountHighlights();
-	const cell = document.querySelector(`.col-cell[data-col-id="${entry.colId}"]`);
+	const cell = document.querySelector(`.col-cell[data-col-id="${CSS.escape(entry.colId)}"]`);
 	if (!cell) return;
 	const count = cell.querySelector('.sw-col-count');
 	if (!count) return;
@@ -1030,7 +897,7 @@ function cycleFilteredCard(direction) {
 	}
 
 	requestAnimationFrame(() => {
-		const el = document.querySelector(`.card[data-card-id="${entry.cardId}"]`);
+		const el = cardEl(entry.cardId);
 		if (el) {
 			el.focus();
 			el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
@@ -1055,7 +922,7 @@ document.addEventListener('click', (e) => {
 	));
 	requestAnimationFrame(() => {
 		requestAnimationFrame(() => {
-			const el = document.querySelector(`.card[data-card-id="${firstCardId}"]`);
+			const el = cardEl(firstCardId);
 			if (el) {
 				el.focus();
 				el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
@@ -1116,6 +983,7 @@ function initKeyboard() {
 				});
 				if (hasVisible) {
 					pushUndo('expand swimlane');
+					_lastNavFilter = null; // re-run filter navigation so focus lands on the revealed match
 					projects.update(all => all.map(pr => pr.id === p.id ? { ...pr, collapsed: false } : pr));
 					return;
 				}
@@ -1159,24 +1027,14 @@ function initKeyboard() {
 						try {
 							const data = JSON.parse(text);
 							if (data.stages && data.cards) {
-								pushUndo('paste JSON');
-								batch(() => {
-									stages.set(data.stages);
-									if (data.projects) projects.set(data.projects);
-									cards.set(data.cards);
-								});
+								applyBoard(data, 'paste JSON');
 								showToast(`Pasted ${data.cards.length} cards`);
 								return;
 							}
 						} catch (_) {}
 						const parsed = parseBoardMd(text);
 						if (parsed.cards.length) {
-							pushUndo('paste markdown');
-							batch(() => {
-								if (parsed.stages.length) stages.set(parsed.stages);
-								if (parsed.projects.length) projects.set(parsed.projects);
-								cards.set(parsed.cards);
-							});
+							applyBoard(parsed, 'paste markdown');
 							showToast(`Pasted ${parsed.cards.length} cards`);
 						}
 					}
@@ -1191,7 +1049,7 @@ function initKeyboard() {
 			}
 			if (e.key === 'e') {
 				const focused = document.activeElement?.closest('.card[data-card-id]');
-				if (focused) { inlineEditCard(focused); return; }
+				if (focused) { e.preventDefault(); inlineEditCard(focused); return; }
 			}
 			if (e.key === 'Enter') {
 				const focused = document.activeElement?.closest('.card[data-card-id]');
@@ -1350,7 +1208,7 @@ function moveCardByKey(cardEl, key) {
 		});
 		// Re-focus after re-render
 		requestAnimationFrame(() => {
-			document.querySelector(`.card[data-card-id="${cardId}"]`)?.focus();
+			cardEl(cardId)?.focus();
 		});
 		announce(`Moved ${key === 'ArrowUp' ? 'up' : 'down'}`);
 	} else if (key === 'ArrowLeft' || key === 'ArrowRight') {
@@ -1367,7 +1225,7 @@ function moveCardByKey(cardEl, key) {
 		pushUndo('move card');
 		moveCard(cardId, nextColId, null);
 		requestAnimationFrame(() => {
-			document.querySelector(`.card[data-card-id="${cardId}"]`)?.focus();
+			cardEl(cardId)?.focus();
 		});
 		announce(`Moved to ${nextCell.getAttribute('aria-label') || 'column'}`);
 	}
@@ -1383,12 +1241,11 @@ let _openCardSnapshot = null;
 let _openCardUndoPushed = false;
 
 function openCardPanel(cardId) {
-	const card = cardMap.peek().get(cardId) || cards.peek().find(c => c.id === cardId);
+	const card = cardMap.peek().get(cardId);
 	if (!card) return;
 	document.activeElement?.blur();
 	_openCardId = cardId;
 	_openCardSnapshot = structuredClone(card);
-	focusedCardId.set(cardId);
 
 	const backdrop = document.getElementById('cpanel-backdrop');
 	document.getElementById('cpanel-title').value = card.title;
@@ -1414,15 +1271,15 @@ function openCardPanel(cardId) {
 	// Project dropdown
 	const projSelect = document.getElementById('cpanel-project');
 	projSelect.innerHTML = '<option value="inbox">Inbox</option>' +
-		projects.peek().map(p => `<option value="${p.id}">${escHtml(p.name)}</option>`).join('');
+		projects.peek().map(p => `<option value="${escHtml(p.id)}">${escHtml(p.name)}</option>`).join('');
 	projSelect.value = card.projectId || 'inbox';
 
 	// Stage dropdown
 	const stageSelect = document.getElementById('cpanel-stage');
-	const currentStageId = card.columnId === 'inbox-col' ? '' : card.columnId.split('-').pop();
+	const currentStageId = parseColId(card.columnId).stageId || '';
 	function populateStages() {
 		stageSelect.innerHTML = stages.peek().map(s =>
-			`<option value="${s.id}">${escHtml(s.name)}${s.done ? ' ✓' : ''}</option>`
+			`<option value="${escHtml(s.id)}">${escHtml(s.name)}${s.done ? ' ✓' : ''}</option>`
 		).join('');
 		stageSelect.value = currentStageId || stages.peek()[0]?.id || '';
 		stageSelect.disabled = projSelect.value === 'inbox';
@@ -1448,7 +1305,7 @@ function renderChips(containerId, items, prefix, inputId) {
 	for (const item of items) {
 		const chip = document.createElement('span');
 		chip.className = 'chip';
-		chip.innerHTML = `${prefix}${escHtml(item)} <button class="chip-remove" data-remove="${item}">&times;</button>`;
+		chip.innerHTML = `${prefix}${escHtml(item)} <button class="chip-remove">&times;</button>`;
 		container.insertBefore(chip, input);
 	}
 }
@@ -1480,7 +1337,6 @@ function closeCardPanel(autoSave = true) {
 	_openCardId = null;
 	_openCardSnapshot = null;
 	_openCardUndoPushed = false;
-	focusedCardId.set(null);
 }
 
 function saveCardPanel() {
@@ -1501,39 +1357,36 @@ function saveCardPanel() {
 	const newProjId = document.getElementById('cpanel-project').value;
 	const newStageId = document.getElementById('cpanel-stage').value;
 
-	batch(() => {
-		cards.update(all => all.map(c => {
-			if (c.id !== _openCardId) return c;
-			const projectId = newProjId;
-			const columnId = newProjId === 'inbox' ? 'inbox-col' : `col-${newProjId}-${newStageId}`;
-			return {
-				...c, title, type, notes, startDate, dueDate, assignees, labels,
-				columnId, projectId,
-				_v: Date.now(),
-			};
-		}));
-	});
+	const columnId = newProjId === 'inbox' ? 'inbox-col' : `col-${newProjId}-${newStageId}`;
+	cards.update(all => all.map(c => {
+		if (c.id !== _openCardId) return c;
+		const next = { ...c, title, type, notes, startDate, dueDate, assignees, labels, columnId, projectId: newProjId, _v: Date.now() };
+		if (columnId !== c.columnId) {
+			// Moved via the dropdowns: append to the target column, like a drop would
+			next.order = cardsByColumn.peek().get(columnId)?.length ?? 0;
+			if (stages.peek().find(s => s.id === newStageId)?.done && newProjId !== 'inbox') next.done = true;
+		}
+		return next;
+	}));
 	showToast('Saved');
 }
 
 function deleteCard(cardId) {
 	pushUndo('delete card');
 	const idToDelete = cardId || _openCardId;
-	batch(() => {
-		cards.update(all => all.filter(c => c.id !== idToDelete));
-	});
+	cards.update(all => all.filter(c => c.id !== idToDelete));
+	_openCardSnapshot = null; // nothing to revert — don't toast "Changes reverted"
 	closeCardPanel(false);
 	if (navigator.vibrate) navigator.vibrate(50);
 	showToast('Card deleted');
 }
 
-function addCardToCol(colId) {
-	pushUndo('new card');
+function addCardToCol(colId, skipUndo) {
+	if (!skipUndo) pushUndo('new card');
 	const id = 'c' + Date.now().toString(36);
-	const parts = colId.split('-');
-	const projectId = parts.length >= 3 ? parts.slice(1, -1).join('-') : 'inbox';
-	const existing = cards.peek().filter(c => c.columnId === colId);
-	const stg = stages.peek().find(s => colId.endsWith(s.id));
+	const { projectId, stageId } = parseColId(colId);
+	const existing = cardsByColumn.peek().get(colId) ?? [];
+	const stg = stages.peek().find(s => s.id === stageId);
 
 	const card = {
 		id, title: '', columnId: colId, projectId,

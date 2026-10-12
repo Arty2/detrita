@@ -2,63 +2,67 @@
 
 let _cellEditColId = null;
 
+// One card as an Obsidian-style list item, with notes as indented continuation lines.
+function cardToMd(c) {
+	let line = `- [${c.done ? 'x' : ' '}] ${c.title}`;
+	for (const a of c.assignees) line += ` @${a}`;
+	for (const l of c.labels) line += ` #${l}`;
+	if (c.type === 'meeting') line += ' $meeting';
+	if (c.type === 'followup') line += ' $followup';
+	if (c.startDate) line += ` start:${c.startDate}`;
+	if (c.dueDate) line += ` due:${c.dueDate}`;
+	line += ` ^${c.id}\n`;
+	if (c.notes) for (const nl of c.notes.split('\n')) line += `  ${nl}\n`;
+	return line;
+}
+
+// Parse a markdown list item ("- [x] Title @who #tag due:… ^id" or a bare "- Title").
+// Returns null for non-list lines.
+function parseCardLine(line) {
+	const taskMatch = line.match(/^-\s+\[([ xX])\]\s+(.+)/);
+	const bareMatch = !taskMatch && line.match(/^-\s+(.+)/);
+	if (!taskMatch && !bareMatch) return null;
+	const done = taskMatch ? taskMatch[1] !== ' ' : false;
+	let rest = taskMatch ? taskMatch[2] : bareMatch[1];
+	const assignees = [], labels = [];
+	let dueDate = null, startDate = null, blockId = null, type = 'task';
+
+	const idMatch = rest.match(/\s*\^(\S+)\s*$/);
+	if (idMatch) { blockId = idMatch[1]; rest = rest.replace(idMatch[0], ''); }
+	const dueMatch = rest.match(/(?:📅\s*|due:)(\d{4}-\d{2}-\d{2})/);
+	if (dueMatch) { dueDate = dueMatch[1]; rest = rest.replace(dueMatch[0], ''); }
+	const startMatch = rest.match(/(?:⏳\s*|start:)(\d{4}-\d{2}-\d{2})/);
+	if (startMatch) { startDate = startMatch[1]; rest = rest.replace(startMatch[0], ''); }
+	if (/\$meeting/.test(rest)) { type = 'meeting'; rest = rest.replace(/\$meeting/g, ''); }
+	if (/\$followup/.test(rest)) { type = 'followup'; rest = rest.replace(/\$followup/g, ''); }
+	rest = rest.replace(/@(\w+)/g, (_, name) => { assignees.push(name); return ''; });
+	rest = rest.replace(/#(\w+)/g, (_, label) => { labels.push(label); return ''; });
+
+	return { blockId, title: rest.trim(), done, type, assignees, labels, startDate, dueDate };
+}
+
+function newCardId() {
+	return 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+}
+
 function serializeCellMd(colId) {
-	const cc = cardsByColumn.peek().get(colId) ?? [];
-	let md = '';
-	for (const c of cc) {
-		const check = c.done ? 'x' : ' ';
-		let line = `- [${check}] ${c.title}`;
-		for (const a of c.assignees) line += ` @${a}`;
-		for (const l of c.labels) line += ` #${l}`;
-		if (c.type === 'meeting') line += ' $meeting';
-		if (c.type === 'followup') line += ' $followup';
-		if (c.startDate) line += ` start:${c.startDate}`;
-		if (c.dueDate) line += ` due:${c.dueDate}`;
-		line += ` ^${c.id}`;
-		md += line + '\n';
-		if (c.notes) {
-			for (const nl of c.notes.split('\n')) {
-				md += `  ${nl}\n`;
-			}
-		}
-	}
-	return md;
+	return (cardsByColumn.peek().get(colId) ?? []).map(cardToMd).join('');
 }
 
 function parseCellCards(text, colId) {
-	const lines = text.split('\n');
-	const parts = colId.split('-');
-	const projectId = parts.length >= 3 ? parts.slice(1, -1).join('-') : 'inbox';
+	const { projectId } = parseColId(colId);
 	const result = [];
 	let lastCard = null;
 	let order = 0;
 
-	for (const line of lines) {
-		const taskMatch = line.match(/^-\s+\[([ xX])\]\s+(.+)/);
-		const bareMatch = !taskMatch && line.match(/^-\s+(.+)/);
-
-		if (taskMatch || bareMatch) {
-			const done = taskMatch ? taskMatch[1] !== ' ' : false;
-			let rest = taskMatch ? taskMatch[2] : bareMatch[1];
-			const assignees = [], labels = [];
-			let dueDate = null, startDate = null, blockId = null, type = 'task';
-
-			const idMatch = rest.match(/\s*\^(\S+)\s*$/);
-			if (idMatch) { blockId = idMatch[1]; rest = rest.replace(idMatch[0], ''); }
-			const dueMatch = rest.match(/(?:📅\s*|due:)(\d{4}-\d{2}-\d{2})/);
-			if (dueMatch) { dueDate = dueMatch[1]; rest = rest.replace(dueMatch[0], ''); }
-			const startMatch = rest.match(/(?:⏳\s*|start:)(\d{4}-\d{2}-\d{2})/);
-			if (startMatch) { startDate = startMatch[1]; rest = rest.replace(startMatch[0], ''); }
-			if (/\$meeting/.test(rest)) { type = 'meeting'; rest = rest.replace(/\$meeting/g, ''); }
-			if (/\$followup/.test(rest)) { type = 'followup'; rest = rest.replace(/\$followup/g, ''); }
-			rest = rest.replace(/@(\w+)/g, (_, name) => { assignees.push(name); return ''; });
-			rest = rest.replace(/#(\w+)/g, (_, label) => { labels.push(label); return ''; });
-
+	for (const line of text.split('\n')) {
+		const p = parseCardLine(line);
+		if (p) {
+			const { blockId, ...fields } = p;
 			lastCard = {
-				id: blockId || ('c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5)),
-				title: rest.trim(), columnId: colId, projectId,
-				order: order++, done, type, assignees, labels,
-				notes: '', startDate, dueDate,
+				id: blockId || newCardId(),
+				...fields, columnId: colId, projectId,
+				order: order++, notes: '',
 				_v: Date.now(), _created: Date.now(),
 				_existingId: blockId,
 			};
@@ -133,14 +137,9 @@ function saveCellEditor() {
 		cards.update(all => {
 			const kept = all.filter(c => !oldIds.has(c.id));
 			// Add parsed cards, preserving existing data where blockId matches
-			for (const nc of newCards) {
-				const existing = nc._existingId ? oldMap.get(nc._existingId) : null;
-				if (existing) {
-					kept.push({ ...existing, ...nc, id: existing.id, _created: existing._created, _v: Date.now() });
-				} else {
-					delete nc._existingId;
-					kept.push(nc);
-				}
+			for (const { _existingId, ...nc } of newCards) {
+				const existing = _existingId ? oldMap.get(_existingId) : null;
+				kept.push(existing ? { ...existing, ...nc, id: existing.id, _created: existing._created } : nc);
 			}
 			return kept;
 		});
@@ -165,7 +164,6 @@ function inlineEditCard(cardEl) {
 	const titleEl = cardEl.querySelector('.card__title');
 	if (!titleEl) return;
 
-	cardEl.dataset.interacting = 'true';
 	const input = document.createElement('input');
 	input.type = 'text';
 	input.value = card.title;
@@ -175,20 +173,22 @@ function inlineEditCard(cardEl) {
 	input.focus();
 	input.select();
 
+	let cancelled = false;
 	const finish = () => {
 		const newTitle = input.value.trim() || card.title;
-		batch(() => {
-			cards.update(all => all.map(c => {
-				if (c.id !== cardId) return c;
-				return { ...c, title: newTitle, _v: Date.now() };
-			}));
-		});
-		delete cardEl.dataset.interacting;
+		if (cancelled || newTitle === card.title) { input.replaceWith(titleEl); return; }
+		pushUndo('rename card');
+		cards.update(all => all.map(c => c.id === cardId ? { ...c, title: newTitle, _v: Date.now() } : c));
 	};
 
 	input.addEventListener('blur', finish, { once: true });
 	input.addEventListener('keydown', (e) => {
-		if (e.key === 'Enter' || e.key === 'Escape') { e.preventDefault(); input.blur(); }
+		if (e.key === 'Enter' || e.key === 'Escape') {
+			e.preventDefault();
+			e.stopPropagation(); // keep Escape from also clearing the filter / closing panels
+			cancelled = e.key === 'Escape';
+			input.blur();
+		}
 	});
 }
 
@@ -274,40 +274,55 @@ class PersistenceLayer {
 	_createWorker() {
 		const code = `
 			let opfsRoot = null, db = null;
-			self.onmessage = async ({ data }) => {
+			// Every message runs on one promise chain: a save can't start before init has
+			// finished, and two saves never write the file concurrently (last one wins).
+			let queue = Promise.resolve();
+			self.onmessage = ({ data }) => { queue = queue.then(() => handle(data)).catch(() => {}); };
+			async function handle(data) {
 				if (data.type === 'init') {
-					try { opfsRoot = await self.navigator.storage.getDirectory(); } catch (_) {}
-					if (!opfsRoot) {
-						try {
+					if (data.opfs) {
+						try { opfsRoot = await self.navigator.storage.getDirectory(); } catch (_) {}
+					} else {
+						db = await new Promise((resolve) => {
 							const req = indexedDB.open('detrita', 1);
 							req.onupgradeneeded = (e) => {
 								const d = e.target.result;
 								if (!d.objectStoreNames.contains('state')) d.createObjectStore('state');
 							};
-							req.onsuccess = () => { db = req.result; };
-						} catch (_) {}
+							req.onsuccess = () => resolve(req.result);
+							req.onerror = () => resolve(null);
+						});
 					}
 					return;
 				}
 				if (data.type === 'save') {
-					try {
-						if (opfsRoot) {
-							const h = await opfsRoot.getFileHandle('board.json', { create: true });
+					if (opfsRoot) {
+						const h = await opfsRoot.getFileHandle('board.json', { create: true });
+						if (h.createSyncAccessHandle) {
+							// Worker-only API; the one Safari < 26 has (it lacks createWritable)
+							const ah = await h.createSyncAccessHandle();
+							try {
+								const bytes = new TextEncoder().encode(data.payload);
+								ah.truncate(0);
+								ah.write(bytes, { at: 0 });
+								ah.flush();
+							} finally { ah.close(); }
+						} else {
 							const w = await h.createWritable();
 							await w.write(data.payload);
 							await w.close();
-						} else if (db) {
-							const tx = db.transaction('state', 'readwrite');
-							tx.objectStore('state').put(data.payload, 'board');
 						}
-					} catch (_) {}
+					} else if (db) {
+						db.transaction('state', 'readwrite').objectStore('state').put(data.payload, 'board');
+					}
 				}
-			};
+			}
 		`;
 		const blob = new Blob([code], { type: 'application/javascript' });
 		const url = URL.createObjectURL(blob);
 		const w = new Worker(url);
-		w.postMessage({ type: 'init' });
+		// Use the same backend as the main thread, so load() reads what the worker wrote.
+		w.postMessage({ type: 'init', opfs: !!this._opfsRoot });
 		return w;
 	}
 
@@ -379,6 +394,8 @@ class PersistenceLayer {
 // ══════════════════════════════════════════════════════════════
 
 const persistence = new PersistenceLayer();
+let _bootReady = Promise.resolve(); // settles once the saved board (or the demo) is in place
+const LOCAL_MODIFIED_KEY = 'detrita-local-modified';
 
 function initApp() {
 
@@ -394,16 +411,9 @@ function initApp() {
 	} catch (_) {}
 
 	// Initialize persistence and load saved state
-	persistence.init().then(() => persistence.load()).then(saved => {
+	_bootReady = persistence.init().then(() => persistence.load()).then(saved => {
 		if (saved) {
-			batch(() => {
-				if (saved.stages) stages.set(saved.stages);
-				if (saved.projects) projects.set(saved.projects);
-				if (saved.cards) cards.set(saved.cards);
-				if (saved.stages && saved.projects) {
-					cols.set(makeCols(saved.projects, saved.stages));
-				}
-			});
+			applyBoard(saved);
 		} else {
 			// First visit — load tutorial demo and show help
 			const demo = getDemoData();
@@ -411,7 +421,6 @@ function initApp() {
 				stages.set(demo.stages);
 				projects.set(demo.projects);
 				cards.set(demo.cards);
-				cols.set(makeCols(demo.projects, demo.stages));
 			});
 			setTimeout(() => toggleHelp(), 300);
 		}
@@ -420,21 +429,29 @@ function initApp() {
 	// Render
 	let _boardRenderPending = false;
 	let _inboxRenderPending = false;
+	// Subscribe to the raw signals, not the computed indexes: reading a computed here would
+	// rebuild it synchronously on every mutation. The frame callback builds it once instead.
 	effect(() => {
-		stages.get(); projects.get(); cardsByColumn.get(); visibleIds.get();
+		stages.get(); projects.get(); cards.get(); filterStr.get();
 		if (!_boardRenderPending) {
 			_boardRenderPending = true;
 			requestAnimationFrame(() => { _boardRenderPending = false; updateColumnWidth(); renderBoard(); });
 		}
 	});
 	effect(() => {
-		cardsByColumn.get(); visibleIds.get();
+		cards.get(); filterStr.get();
 		if (!_inboxRenderPending) {
 			_inboxRenderPending = true;
 			requestAnimationFrame(() => { _inboxRenderPending = false; renderInbox(); });
 		}
 	});
 	window.addEventListener('resize', () => { updateColumnWidth(); });
+	// Keep "today" current when the app is left open overnight (PWA / pinned tab).
+	document.addEventListener('visibilitychange', () => {
+		if (document.hidden || NOW_STR === localDateStr()) return;
+		NOW_STR = localDateStr();
+		cards.set([...cards.peek()]); // re-render due/overdue badges
+	});
 	effect(() => {
 		cards.get(); filterStr.get();
 		if ($('stats-bar')?.classList.contains('open')) renderStats();
@@ -491,20 +508,29 @@ function initApp() {
 	// Persistence — auto-save (debounced, skip if unchanged)
 	let saveTimer = null;
 	let lastSavedHash = '';
-	effect(() => {
-		const data = {
-			stages: stages.get(),
-			projects: projects.get(),
-			cards: cards.get(),
-		};
+	let pendingSave = null;
+	const flushSave = () => {
 		clearTimeout(saveTimer);
-		saveTimer = setTimeout(() => {
-			const json = JSON.stringify(data);
-			if (json === lastSavedHash) return;
-			lastSavedHash = json;
-			persistence.saveRaw(json);
-			fileSync.scheduleSave();
-		}, 1000);
+		const data = pendingSave;
+		pendingSave = null;
+		if (!data) return;
+		const json = JSON.stringify(data);
+		if (json === lastSavedHash) return;
+		lastSavedHash = json;
+		persistence.saveRaw(json);
+		try { localStorage.setItem(LOCAL_MODIFIED_KEY, String(Date.now())); } catch (_) {}
+		fileSync.scheduleSave();
+	};
+	effect(() => {
+		pendingSave = { stages: stages.get(), projects: projects.get(), cards: cards.get() };
+		clearTimeout(saveTimer);
+		saveTimer = setTimeout(flushSave, 1000);
+	});
+	// Don't lose the last second of edits (or a pending file sync) when the tab is hidden or closed
+	document.addEventListener('visibilitychange', () => {
+		if (!document.hidden) return;
+		flushSave();
+		if (fileSync._dirty) fileSync.saveNow();
 	});
 
 	// Keyboard
@@ -515,6 +541,24 @@ function initApp() {
 }
 
 let _boardDragType = null; // 'stage' | 'project' | null
+
+// Move item `fromId` next to `toId` (after it when `after`, else before) — matching the
+// side the drop indicator showed — and toast where it landed.
+function reorderSignal(sig, fromId, toId, after, action) {
+	const arr = [...sig.peek()];
+	const fromIdx = arr.findIndex(x => x.id === fromId);
+	if (fromIdx < 0) return;
+	const [moved] = arr.splice(fromIdx, 1);
+	const toIdx = arr.findIndex(x => x.id === toId);
+	if (toIdx < 0) return;
+	const newIdx = toIdx + (after ? 1 : 0);
+	if (newIdx === fromIdx) return; // dropped back where it was
+	pushUndo(action);
+	arr.splice(newIdx, 0, moved);
+	sig.set(arr);
+	const rel = arr[newIdx - 1] ? `after ${arr[newIdx - 1].name}` : `before ${arr[newIdx + 1]?.name || ''}`;
+	showToast(`${moved.name} → ${rel}`);
+}
 
 function wireUpBoardEvents() {
 	const board = document.getElementById('board');
@@ -614,12 +658,9 @@ function wireUpBoardEvents() {
 					s.id === stageId ? { ...s, done: !s.done } : s
 				));
 				// Mark/unmark all cards in this stage
-				cards.update(all => all.map(c => {
-					if (c.columnId.endsWith('-' + stageId)) {
-						return { ...c, done: !wasDone, _v: Date.now() };
-					}
-					return c;
-				}));
+				cards.update(all => all.map(c =>
+					parseColId(c.columnId).stageId === stageId ? { ...c, done: !wasDone, _v: Date.now() } : c
+				));
 			});
 			return;
 		}
@@ -740,23 +781,8 @@ function wireUpBoardEvents() {
 			if (target && fromId) {
 				const toId = target.dataset.stageId;
 				if (fromId !== toId) {
-					pushUndo('reorder stages');
 					const rect = target.getBoundingClientRect();
-					const onLeft = e.clientX < rect.left + rect.width / 2;
-					stages.update(all => {
-						const arr = [...all];
-						const fromIdx = arr.findIndex(s => s.id === fromId);
-						const toIdx = arr.findIndex(s => s.id === toId);
-						const [m] = arr.splice(fromIdx, 1);
-						arr.splice(toIdx, 0, m);
-						return arr;
-					});
-					const stgs = stages.peek();
-					const newIdx = stgs.findIndex(s => s.id === fromId);
-					const movedName = stgs[newIdx]?.name;
-					const neighbor = stgs[newIdx - 1] || stgs[newIdx + 1];
-					const rel = stgs[newIdx - 1] ? `after ${stgs[newIdx - 1].name}` : `before ${stgs[newIdx + 1]?.name || ''}`;
-					showToast(`${movedName} → ${rel}`);
+					reorderSignal(stages, fromId, toId, e.clientX >= rect.left + rect.width / 2, 'reorder stages');
 				}
 			}
 			clearReorderIndicator();
@@ -770,20 +796,8 @@ function wireUpBoardEvents() {
 			if (target && fromId) {
 				const toId = target.dataset.project;
 				if (fromId !== toId) {
-					pushUndo('reorder swimlanes');
-					projects.update(all => {
-						const arr = [...all];
-						const fromIdx = arr.findIndex(p => p.id === fromId);
-						const toIdx = arr.findIndex(p => p.id === toId);
-						const [m] = arr.splice(fromIdx, 1);
-						arr.splice(toIdx, 0, m);
-						return arr;
-					});
-					const projs = projects.peek();
-					const newIdx = projs.findIndex(p => p.id === fromId);
-					const movedName = projs[newIdx]?.name;
-					const rel = projs[newIdx - 1] ? `after ${projs[newIdx - 1].name}` : `before ${projs[newIdx + 1]?.name || ''}`;
-					showToast(`${movedName} → ${rel}`);
+					const rect = target.getBoundingClientRect();
+					reorderSignal(projects, fromId, toId, e.clientY >= rect.top + rect.height / 2, 'reorder swimlanes');
 				}
 			}
 			clearReorderIndicator();
@@ -805,9 +819,8 @@ function wireUpBoardEvents() {
 			// Don't toggle done in done-columns
 			const colCell = card.closest('.col-cell[data-col-id]');
 			if (colCell) {
-				const stageId = colCell.dataset.colId.split('-').pop();
-				const stg = stages.peek().find(s => s.id === stageId);
-				if (stg?.done) return;
+				const { stageId } = parseColId(colCell.dataset.colId);
+				if (stages.peek().find(s => s.id === stageId)?.done) return;
 			}
 			const cardId = card.dataset.cardId;
 			pushUndo('toggle done');
@@ -839,14 +852,9 @@ function wireUpBoardEvents() {
 			if (isLast && isEmpty) {
 				const swimlane = cell.closest('.swimlane[data-project]');
 				const projId = swimlane?.dataset.project;
-				const stageId = 'stage-' + Date.now().toString(36);
 				pushUndo('new stage + card');
-				batch(() => {
-					stages.update(all => [...all, { id: stageId, name: 'New stage', color: '#7a5040', done: false }]);
-					const projs = projects.peek();
-					cols.update(all => [...all, ...projs.map(p => ({ id: `col-${p.id}-${stageId}`, name: 'New stage', pId: p.id, stage: stageId, wip: 0 }))]);
-				});
-				if (projId) addCardToCol(`col-${projId}-${stageId}`);
+				const stageId = addStage();
+				if (projId) addCardToCol(`col-${projId}-${stageId}`, true);
 			} else {
 				addCardToCol(cell.dataset.colId);
 			}
@@ -857,30 +865,20 @@ function wireUpBoardEvents() {
 		const projDropCell = e.target.closest('.proj-drop-zone-cell[data-proj-drop-stage]');
 		const projDropLabel = e.target.closest('.proj-drop-zone-label');
 		if (projDropCell || projDropLabel) {
-			const stageId = projDropCell?.dataset.projDropStage || stages.peek()[0]?.id || 'backlog';
-			const projId = 'p' + Date.now().toString(36);
-			const projName = 'New swimlane';
-			batch(() => {
-				projects.update(all => [...all, { id: projId, name: projName, color: SWATCH_COLORS[all.length % SWATCH_COLORS.length], collapsed: false }]);
-				const stgs = stages.peek();
-				cols.update(all => [...all, ...stgs.map(s => ({ id: `col-${projId}-${s.id}`, name: s.name, pId: projId, stage: s.id, wip: 0 }))]);
-			});
-			addCardToCol(`col-${projId}-${stageId}`);
+			const stageId = projDropCell?.dataset.projDropStage || stages.peek()[0]?.id;
+			pushUndo('new swimlane + card');
+			const projId = addSwimlane();
+			if (stageId) addCardToCol(`col-${projId}-${stageId}`, true);
 			return;
 		}
 
 		// Double-click stage-cell-add → create column + card
 		const stageAddDbl = e.target.closest('.stage-cell-add');
 		if (stageAddDbl) {
-			const stageId = 'stage-' + Date.now().toString(36);
 			const projId = stageAddDbl.dataset.projStageAdd || projects.peek()[0]?.id;
 			pushUndo('new stage + card');
-			batch(() => {
-				stages.update(all => [...all, { id: stageId, name: 'New stage', color: '#7a5040', done: false }]);
-				const projs = projects.peek();
-				cols.update(all => [...all, ...projs.map(p => ({ id: `col-${p.id}-${stageId}`, name: 'New stage', pId: p.id, stage: stageId, wip: 0 }))]);
-			});
-			if (projId) addCardToCol(`col-${projId}-${stageId}`);
+			const stageId = addStage();
+			if (projId) addCardToCol(`col-${projId}-${stageId}`, true);
 			return;
 		}
 	});
@@ -951,37 +949,9 @@ function wireUpBoardEvents() {
 			const toId = isStage ? target.dataset.stageId : target.dataset.project;
 			if (toId === sourceId) return;
 
-			if (isStage) {
-				pushUndo('reorder stages');
-				stages.update(all => {
-					const arr = [...all];
-					const from = arr.findIndex(s => s.id === sourceId);
-					const to = arr.findIndex(s => s.id === toId);
-					const [m] = arr.splice(from, 1);
-					arr.splice(to, 0, m);
-					return arr;
-				});
-				const stgs = stages.peek();
-				const newIdx = stgs.findIndex(s => s.id === sourceId);
-				const movedName = stgs[newIdx]?.name;
-				const rel = stgs[newIdx - 1] ? `after ${stgs[newIdx - 1].name}` : `before ${stgs[newIdx + 1]?.name || ''}`;
-				showToast(`${movedName} → ${rel}`);
-			} else {
-				pushUndo('reorder swimlanes');
-				projects.update(all => {
-					const arr = [...all];
-					const from = arr.findIndex(p => p.id === sourceId);
-					const to = arr.findIndex(p => p.id === toId);
-					const [m] = arr.splice(from, 1);
-					arr.splice(to, 0, m);
-					return arr;
-				});
-				const projs = projects.peek();
-				const newIdx = projs.findIndex(p => p.id === sourceId);
-				const movedName = projs[newIdx]?.name;
-				const rel = projs[newIdx - 1] ? `after ${projs[newIdx - 1].name}` : `before ${projs[newIdx + 1]?.name || ''}`;
-				showToast(`${movedName} → ${rel}`);
-			}
+			const rect = target.getBoundingClientRect();
+			if (isStage) reorderSignal(stages, sourceId, toId, ev.clientX >= rect.left + rect.width / 2, 'reorder stages');
+			else reorderSignal(projects, sourceId, toId, ev.clientY >= rect.top + rect.height / 2, 'reorder swimlanes');
 		};
 
 		document.addEventListener('pointermove', onMove, { passive: false });

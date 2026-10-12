@@ -6,13 +6,14 @@
  * order and inlined into the shell, so the output is byte-for-byte what you get by
  * hand-writing one file. Edit files under src/ — never edit detrita.html directly.
  *
- *   node build.js            # writes ./detrita.html
- *   node build.js --check    # builds in memory and fails if ./detrita.html is stale
+ *   node build.js            # writes ./detrita.html, ./index.html and ./sw.js
+ *   node build.js --check    # builds in memory and fails if any output is stale
  *
  * See CLAUDE.md for the source layout and conventions.
  */
 'use strict';
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
@@ -49,12 +50,28 @@ function build() {
 		.replace(SCRIPTS_MARKER, () => scripts);
 }
 
+// The service worker is a separate static file (browsers won't register one from a
+// blob: URL). Its cache name is a hash of everything it caches, so each release gets a
+// fresh cache and returning users never keep a stale copy of the app.
+const SW_OUT = path.join(ROOT, 'sw.js');
+const SW_ASSETS = ['manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png', 'icons/apple-touch-icon-180.png'];
+
+function buildServiceWorker(html) {
+	const hash = crypto.createHash('sha256').update(html);
+	for (const f of SW_ASSETS) hash.update(fs.readFileSync(path.join(ROOT, f)));
+	const src = fs.readFileSync(path.join(SRC, 'sw.js'), 'utf8');
+	const marker = "'detrita-__BUILD_HASH__'";
+	if (!src.includes(marker)) throw new Error('src/sw.js: missing cache-name marker');
+	return src.replace(marker, () => `'detrita-${hash.digest('hex').slice(0, 12)}'`);
+}
+
 const html = build();
+const files = [...OUTPUTS.map((p) => [p, html]), [SW_OUT, buildServiceWorker(html)]];
 
 if (process.argv.includes('--check')) {
-	const stale = OUTPUTS.filter(
-		(p) => (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '') !== html,
-	);
+	const stale = files
+		.filter(([p, content]) => (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '') !== content)
+		.map(([p]) => p);
 	if (stale.length) {
 		console.error(
 			'Stale build output: ' +
@@ -65,9 +82,9 @@ if (process.argv.includes('--check')) {
 	}
 	console.log('Build output is up to date.');
 } else {
-	for (const p of OUTPUTS) fs.writeFileSync(p, html);
+	for (const [p, content] of files) fs.writeFileSync(p, content);
 	console.log(
-		'Built %s (%d bytes).',
+		'Built %s (%d bytes) + sw.js.',
 		OUTPUTS.map((p) => path.basename(p)).join(' + '),
 		Buffer.byteLength(html),
 	);
