@@ -24,9 +24,12 @@ src/
                         #   Split by top-level section: 00-core, 01-undo-redo,
                         #   02-stage-header, 03-swimlanes, 04-cells, 05-drag,
                         #   06-cell-editor, 07-modal-wiring, 08-service-worker, 09-boot.
+  sw.js                 # service worker source; build writes it to ./sw.js with a
+                        #   content-hashed cache name.
 build.js                # zero-dependency Node build (concatenate + inline).
 detrita.html        # GENERATED, committed (kept in git so it stays openable/portable).
 index.html              # GENERATED, committed — identical copy so static hosts serve "/".
+sw.js                   # GENERATED, committed — the service worker, served next to the app.
 ```
 
 The build is **pure concatenation**: the JS stays one global scope exactly as before, so
@@ -48,8 +51,8 @@ In this sandbox the browser is preinstalled; point Playwright at it:
 installed with `npx playwright install --with-deps chromium` (see `.github/workflows/ci.yml`),
 which also runs the build, verifies `detrita.html` isn't stale, and runs both test suites.
 
-**Workflow for any change:** edit `src/` → `node build.js` → run tests → commit **both** the
-`src/` change and the regenerated `detrita.html`.
+**Workflow for any change:** edit `src/` → `node build.js` → run tests → commit the `src/`
+change together with the regenerated `detrita.html`, `index.html` and `sw.js`.
 
 ## Conventions
 
@@ -70,14 +73,15 @@ which also runs the build, verifies `detrita.html` isn't stale, and runs both te
   | `tests/integrity.test.js` | asserts the built version string |
   | `tests/smoke.spec.js` | asserts the help panel shows it |
 
-  Bumping the version is an HTML change, so bump the service worker cache with it
-  (below) — unless the cache has already been bumped since the last release.
-- **Service worker cache** name is `const CACHE = 'detrita-vN'` in
-  `src/app/08-service-worker.js`. Bump `N` whenever you ship HTML changes so returning
-  offline/PWA users pick up the new build.
-- **Stay inline where it counts.** The favicon and service worker are inlined (data URI /
-  blob) so the built `detrita.html` stays self-contained and openable from `file://`.
-  Keep those inline.
+- **Service worker** (offline support) is the static file `sw.js`, built from `src/sw.js`
+  and registered by `src/app/08-service-worker.js`. It has to be a real file: browsers refuse
+  to register a service worker from a `blob:` or `data:` URL. Its cache name is a hash of the
+  built app, manifest and icons, so there is nothing to bump — any change gets a new cache.
+  The app page is network-first (3 s timeout, then the cached copy), so online users always
+  get the latest build. Commit the regenerated `sw.js` with every build.
+- **Stay inline where it counts.** The favicon is inlined (data URI) so the built
+  `detrita.html` stays self-contained and openable from `file://`, where there's no service
+  worker and none is needed.
 - **Manifest & icons are separate static files.** `manifest.webmanifest` and `icons/*.png`
   live at the repo root and are served next to `detrita.html` — a real manifest URL is
   what makes the PWA reliably installable (a `data:` manifest can't resolve `start_url`). The
@@ -96,7 +100,7 @@ primary fix for the root 404. On **Vercel**, `vercel.json` also turns the build 
 `buildCommand`/`installCommand`, `outputDirectory: "."`) and serves the committed repo root —
 otherwise Vercel sees `package.json`, runs `npm run build`, and then fails looking for a
 `public/` output dir. `cleanUrls` makes `/detrita` resolve; the config serves
-`/manifest.webmanifest` with the right `Content-Type` and long-caches `/icons/*`. A `/` →
+`/manifest.webmanifest` with the right `Content-Type`, serves `/sw.js` with `no-cache`, and long-caches `/icons/*`. A `/` →
 `/detrita.html` rewrite is kept as a harmless fallback behind `index.html`. `.vercelignore`
 keeps `src/`, `tests/`, and tooling out of the deploy. `_redirects` covers Netlify/Cloudflare
 Pages, which Vercel ignores. Repo: https://github.com/arty2/detrita.

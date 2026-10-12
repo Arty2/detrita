@@ -1,6 +1,6 @@
 {
   "name": "detrita",
-  "version": "0.85.2",
+  "version": "0.86.0",
   "private": true,
   "description": "Local-first, file-native kanban board — single-file HTML app built from src/.",
   "homepage": "https://github.com/arty2/detrita",
