@@ -2,6 +2,8 @@
 
 **/detrita** is a kanban board that runs entirely in the web browser. It needs no account and no server: the whole application is a single HTML file, and the board is stored on the user's own device.
 
+> **Not actively maintained.** /detrita works and is left as it is, but it is no longer being updated or maintained. Issues and pull requests may go unanswered; fork it freely if you need changes.
+
 - Project page: [heracl.es/detrita](https://heracl.es/detrita)
 - Demo: [detrita.vercel.app](https://detrita.vercel.app/)
 - Source: [github.com/arty2/detrita](https://github.com/arty2/detrita)
